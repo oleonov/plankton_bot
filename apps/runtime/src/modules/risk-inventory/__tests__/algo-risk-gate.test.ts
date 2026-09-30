@@ -20,7 +20,11 @@ import type {
   OrderRepository,
   PositionRepository,
 } from "@krabs/domain";
-import { AlgoRiskGateImpl, CONDITION_REDEEM_IN_FLIGHT_REASON } from "../algo-risk-gate.js";
+import {
+  AlgoRiskGateImpl,
+  CONDITION_REDEEM_IN_FLIGHT_REASON,
+  probeBounceRungSellCapacity,
+} from "../algo-risk-gate.js";
 import { matchesExactBounceSupplementalCoverage } from "../../../exit-coverage-cleanup.js";
 import type { Logger } from "../../../logger.js";
 
@@ -1668,5 +1672,133 @@ describe("AlgoRiskGateImpl", () => {
       const decision = await gate.evaluate(makeSignal({ reason: "probe-entry" }));
       expect(decision.approved).toBe(true);
     });
+  });
+});
+
+// docs/plans/2026-09-30-bounce-rung-sell-capacity-storm.md — the probe AlgoDecisionModule
+// consults BEFORE committing/publishing a BOUNCE_EXIT_TARGET rung must answer exactly what
+// the gate's own wallet-SELL-capacity check would answer for the identical signal, or the
+// hold would diverge from what actually gets rejected downstream.
+describe("probeBounceRungSellCapacity", () => {
+  const reservePolicy = makeExecutionPolicy({
+    sellCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+      mode: "legacy_global",
+      maxOpenSellOrders: 400,
+      minNonLadderReserve: 10,
+    },
+    // High enough that total-order and per-token capacity never interfere —
+    // this suite isolates the wallet-SELL-capacity verdict the probe mirrors.
+    orderCapacity: { ...DEFAULT_EXECUTION_POLICY.orderCapacity, maxOpenOrdersTotal: 1000 },
+  });
+
+  function makeBackgroundSellOrders(count: number, tokenPrefix: string): Order[] {
+    return Array.from({ length: count }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `${tokenPrefix}-${index}` as any,
+        clientOrderId: `${tokenPrefix}-cl-${index}` as any,
+        tokenId: createTokenId(`${tokenPrefix}-token-${index}`),
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+  }
+
+  async function expectsGateParity(orders: Order[], tokenId: ReturnType<typeof createTokenId>) {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(makeOpenPosition({ tokenId })),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => reservePolicy,
+    );
+    const decision = await gate.evaluate(
+      makeSignal({
+        tokenId,
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    );
+    return decision.approved;
+  }
+
+  it("matches the gate inside the reserve band (290-299-style carve-out) for an additional rung", async () => {
+    const tokenId = createTokenId("probe-additional-rung");
+    const ownRung = makeOpenSellOrder({
+      orderId: "probe-additional-own" as any,
+      clientOrderId: "probe-additional-own-cl" as any,
+      tokenId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    });
+    const belowReserve = [...makeBackgroundSellOrders(388, "probe-add-below"), ownRung]; // occupancy 389 < 390
+    const atReserve = [...makeBackgroundSellOrders(389, "probe-add-at"), ownRung]; // occupancy 390 >= 390
+
+    const belowResult = probeBounceRungSellCapacity({
+      orderRepo: makeOrderRepo(belowReserve),
+      tokenId,
+      policy: reservePolicy,
+      profileOwnedOpenPositionCount: 0,
+    });
+    expect(belowResult).toEqual({ allowed: true, perTokenOpenSellOrderCount: 1 });
+    expect(await expectsGateParity(belowReserve, tokenId)).toBe(belowResult.allowed);
+
+    const atResult = probeBounceRungSellCapacity({
+      orderRepo: makeOrderRepo(atReserve),
+      tokenId,
+      policy: reservePolicy,
+      profileOwnedOpenPositionCount: 0,
+    });
+    expect(atResult).toEqual({ allowed: false, perTokenOpenSellOrderCount: 1 });
+    expect(await expectsGateParity(atReserve, tokenId)).toBe(atResult.allowed);
+  });
+
+  it("matches the gate at the hard cap (>= 400) for a first exit (no open SELL on the token)", async () => {
+    const tokenId = createTokenId("probe-first-exit");
+    const belowCap = makeBackgroundSellOrders(399, "probe-first-below");
+    const atCap = makeBackgroundSellOrders(400, "probe-first-at");
+
+    const belowResult = probeBounceRungSellCapacity({
+      orderRepo: makeOrderRepo(belowCap),
+      tokenId,
+      policy: reservePolicy,
+      profileOwnedOpenPositionCount: 0,
+    });
+    expect(belowResult).toEqual({ allowed: true, perTokenOpenSellOrderCount: 0 });
+    expect(await expectsGateParity(belowCap, tokenId)).toBe(belowResult.allowed);
+
+    const atResult = probeBounceRungSellCapacity({
+      orderRepo: makeOrderRepo(atCap),
+      tokenId,
+      policy: reservePolicy,
+      profileOwnedOpenPositionCount: 0,
+    });
+    expect(atResult).toEqual({ allowed: false, perTokenOpenSellOrderCount: 0 });
+    expect(await expectsGateParity(atCap, tokenId)).toBe(atResult.allowed);
+  });
+
+  it("reuses a precomputed openOrders snapshot instead of querying findOpen again", () => {
+    const tokenId = createTokenId("probe-openOrders-reuse");
+    const orders = [
+      makeOpenSellOrder({
+        orderId: "reuse-1" as any,
+        clientOrderId: "reuse-1-cl" as any,
+        tokenId,
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      }),
+    ];
+    const orderRepo = makeOrderRepo(orders);
+
+    const result = probeBounceRungSellCapacity({
+      orderRepo,
+      tokenId,
+      policy: reservePolicy,
+      profileOwnedOpenPositionCount: 0,
+      openOrders: orders,
+    });
+
+    expect(result).toEqual({ allowed: true, perTokenOpenSellOrderCount: 1 });
+    expect(orderRepo.findOpen).not.toHaveBeenCalled();
   });
 });

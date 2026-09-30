@@ -15,7 +15,11 @@ import {
 import type { Logger } from "../../logger.js";
 import { classifyCancelAgeBucket } from "../../executable-price.js";
 import { computeAgeMs } from "./cancel-telemetry.js";
-import { clearExchangeAbsence, readExchangeAbsence } from "./exchange-absence.js";
+import {
+  clearExchangeAbsence,
+  readExchangeAbsence,
+  recordExactNullAbsence,
+} from "./exchange-absence.js";
 
 export const DEFAULT_FILL_COMPLETION_TOLERANCE = 0.005;
 export const EXCHANGE_ABSENT_CANCEL_REASON = "exchange-exact-null-absent";
@@ -89,7 +93,8 @@ export function resolveOrderStatusVerdict(
   exchangeNullTerminal = false,
 ): TerminalVerdict {
   const recovery = readPendingBuyRecovery(order);
-  if (recovery && !recovery.completed && !exchange) return { status: "unresolved" };
+  if (recovery && !recovery.completed && !exchange && !exchangeNullTerminal)
+    return { status: "unresolved" };
   // Exact working evidence dominates the local completion heuristic: a
   // near-complete fill set cannot terminalize an order still live on exchange.
   if (exchange?.status === "OPEN") {
@@ -148,6 +153,13 @@ export async function inOrderLifecycleLane<T>(
   }
 }
 
+export type ExchangeAbsenceEvidence = {
+  /** Absent from this pass's reliable open-orders snapshot. */
+  snapshotAbsent: boolean;
+  /** Fill history re-read reliably from creation this pass, with no deferred fill. */
+  historyBackfilled: boolean;
+};
+
 type ApplyOrderVerdictArgs = {
   orderRepo: OrderRepository;
   fillRepo: Pick<FillRepository, "findByOrderId">;
@@ -159,8 +171,10 @@ type ApplyOrderVerdictArgs = {
   timestamp?: number;
   cancelTelemetry?: OrderCancelTelemetry;
   fillCompletionTolerance?: number | undefined;
-  /** See {@link resolveOrderStatusVerdict}; ignored while a pending-BUY recovery is open. */
+  /** See {@link resolveOrderStatusVerdict}; overrides {@link absence} when set. */
   exchangeNullTerminal?: boolean | undefined;
+  /** Evaluates the exchange-absence rule in-lane on an exact null; see exchange-absence.ts. */
+  absence?: ExchangeAbsenceEvidence | undefined;
   isCurrent?: (() => boolean) | undefined;
   recoveryOwner?: (() => boolean) | undefined;
   onVerdictApplied?: ((verdict: TerminalVerdict) => void) | undefined;
@@ -181,6 +195,8 @@ export async function applyOrderVerdictInLane(
   if (args.exchange && readExchangeAbsence(order)) {
     clearExchangeAbsence(args.orderRepo, order.orderId, args.log);
   }
+  const exchangeNullTerminal = args.exchangeNullTerminal ?? evaluateExchangeAbsence(args);
+  order = args.orderRepo.findById(order.orderId)!;
   const applied = (verdict: TerminalVerdict): TerminalVerdict => {
     // Publication can invalidate the owner. Commit proof after events, while
     // still holding the lane; working verdicts revoke it without yielding.
@@ -192,7 +208,13 @@ export async function applyOrderVerdictInLane(
     args.orderRepo.observePendingBuyRecovery?.(order.orderId, args.exchange);
     order = args.orderRepo.findById(order.orderId)!;
     const gross = persistedGrossShares(args.fillRepo, order);
-    const verdict = resolveOrderStatusVerdict(order, args.exchange, gross);
+    const verdict = resolveOrderStatusVerdict(
+      order,
+      args.exchange,
+      gross,
+      undefined,
+      exchangeNullTerminal,
+    );
     if (
       verdict.status === "filled" ||
       verdict.status === "cancelled" ||
@@ -216,7 +238,7 @@ export async function applyOrderVerdictInLane(
     args.exchange,
     gross,
     completionTolerance,
-    args.exchangeNullTerminal,
+    exchangeNullTerminal,
   );
   const exchangeWorking =
     args.exchange?.status === "OPEN" || args.exchange?.status === "PARTIALLY_FILLED";
@@ -262,6 +284,44 @@ export async function applyOrderVerdictInLane(
   return applied(verdict);
 }
 
+/** Records the marker (caller holds the lane) and reports whether the absence rule is met. */
+function evaluateExchangeAbsence(args: ApplyOrderVerdictArgs): boolean {
+  return (
+    !args.exchange &&
+    !!args.absence?.snapshotAbsent &&
+    recordExactNullAbsence(args.orderRepo, args.fillRepo, args.orderId, Date.now(), args.log) &&
+    args.absence.historyBackfilled
+  );
+}
+
+/** Commits the recovery marker together with the terminal status; needs a current owner. */
+function completeRecovery(
+  args: ApplyOrderVerdictArgs,
+  order: Order,
+  verdict: Extract<TerminalVerdict, { status: "filled" | "cancelled" | "rejected" }>,
+): boolean {
+  const owner = args.recoveryOwner;
+  if (!owner) return false;
+  const isCurrent = () => owner() && (args.isCurrent?.() ?? true);
+  if (!args.exchange) {
+    return (
+      verdict.status === "cancelled" &&
+      verdict.reason === EXCHANGE_ABSENT_CANCEL_REASON &&
+      !!args.orderRepo.completePendingBuyRecoveryAbsent?.(order, isCurrent)
+    );
+  }
+  const expected =
+    args.exchange.status === "FILLED"
+      ? "filled"
+      : args.exchange.status === "REJECTED"
+        ? "rejected"
+        : "cancelled";
+  return (
+    expected === verdict.status &&
+    !!args.orderRepo.completePendingBuyRecovery?.(order, args.exchange, isCurrent)
+  );
+}
+
 /** Persist before the first await; caller owns the order lifecycle lane. */
 export async function persistTerminalVerdictInLane(
   args: ApplyOrderVerdictArgs,
@@ -271,26 +331,7 @@ export async function persistTerminalVerdictInLane(
 ): Promise<boolean> {
   const current = args.orderRepo.findById(order.orderId);
   const recovery = current && readPendingBuyRecovery(current);
-  if (recovery) {
-    const expected =
-      args.exchange?.status === "FILLED"
-        ? "filled"
-        : args.exchange?.status === "REJECTED"
-          ? "rejected"
-          : "cancelled";
-    if (
-      recovery.completed ||
-      !args.exchange ||
-      !args.recoveryOwner ||
-      expected !== verdict.status ||
-      !args.orderRepo.completePendingBuyRecovery?.(
-        order,
-        args.exchange,
-        () => args.recoveryOwner!() && (args.isCurrent?.() ?? true),
-      )
-    )
-      return false;
-  }
+  if (recovery && (recovery.completed || !completeRecovery(args, order, verdict))) return false;
   const cancellationTimestamp =
     verdict.status === "cancelled" ? (args.timestamp ?? Date.now()) : undefined;
   const fallbackAge =

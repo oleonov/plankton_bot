@@ -12,11 +12,11 @@
  */
 
 import type { Fill, FillRepository, Order, OrderRepository } from "@krabs/domain";
+import { EXCHANGE_ABSENCE_MARKER_KEY as MARKER_KEY } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export const EXCHANGE_ABSENCE_OBSERVE_MS = 24 * 60 * 60 * 1000;
 export const EXCHANGE_ABSENCE_QUIET_MS = 7 * 24 * 60 * 60 * 1000;
-const MARKER_KEY = "exchangeAbsenceV1";
 
 type MetadataRepo = Pick<OrderRepository, "findById" | "updateMetadataIfUnchanged">;
 type FillTimes = readonly Pick<Fill, "filledAt">[];

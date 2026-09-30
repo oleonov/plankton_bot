@@ -491,8 +491,13 @@ export class ReconciliationModule implements RuntimeModule {
         : skippedFillsResult();
       stageTimingsMs.fills = fetchFills ? Date.now() - stageFillsStart : 0;
       const fillsFetchedReliably = fetchFills && fillResult.skipReason !== "unreliable_fills";
+      const deferredOrderIds = new Set(fillResult.deferredOrderIds);
       const historyBackfilledOrderIds = new Set(
-        fillsFetchedReliably ? backfillCandidates.map((order) => String(order.orderId)) : [],
+        fillsFetchedReliably
+          ? backfillCandidates
+              .map((order) => String(order.orderId))
+              .filter((orderId) => !deferredOrderIds.has(orderId))
+          : [],
       );
       allDetails.push(...fillResult.details);
 

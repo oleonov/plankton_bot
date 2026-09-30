@@ -17,10 +17,16 @@ markers fail closed. Existing maker and SELL recovery restrictions remain in for
 Each protected member must remain an exact transition target until a current exact terminal
 response and committed inventory coverage complete recovery in one SQLite transaction. Saved
 but unapplied fills retain reservation coverage. Consumed lots count by original applied quantity.
-Restart discovers markers independently of local status and reacquires exact evidence. A null
-lookup does not authorize terminalization, signing, reposting or replacement. Only claimed
-`startup_pending_buy_recovery` cancellations may drain these exact IDs; the token stays blocked
-until both members complete. Newly created positions use the normal exit-owner policy.
+Restart discovers markers independently of local status and reacquires exact evidence. A single
+null lookup does not authorize terminalization, signing, reposting or replacement. A member closes
+as cancelled (`exchange-exact-null-absent`) only under the durable exchange-absence rule
+(operator-approved 2026-09-30): absent from a reliable open-orders snapshot and exact null in the
+same pass, an `exchangeAbsenceV1` marker at least 24h old with no fill since, 7 days without any
+activity, and a reliable same-pass fill re-read from creation with no deferred fill. Completion
+still needs a current recovery owner and committed inventory covering the recorded matched
+quantity, written in one transaction with the status; the user-stream catch-up never closes.
+Only claimed `startup_pending_buy_recovery` cancellations may drain these exact IDs; the token
+stays blocked until both members complete. Newly created positions use the normal exit-owner policy.
 
 Release verification must check both IDs, visible unresolved quarantine, stable restart count,
 advancing heartbeat with matching instance/run/profile, reconciliation and market-data progress,

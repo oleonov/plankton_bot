@@ -102,6 +102,7 @@ import {
   hasExactMatchedCoverage,
   persistedGrossShares,
   registerCancelIntent,
+  type ExchangeAbsenceEvidence,
   type TerminalVerdict,
 } from "../reconciliation/order-status-resolver.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
@@ -597,7 +598,7 @@ export interface ExactNullStartupQuarantine {
 export interface SubmitUnknownRecoveryContext {
   readonly order: Order;
   readonly isCurrent: () => boolean;
-  readonly observe: () => Promise<string | undefined>;
+  readonly observe: (absence?: ExchangeAbsenceEvidence) => Promise<string | undefined>;
   readonly applyExact: (
     exchange: ExchangeOrder | null,
     timestamp?: number,
@@ -1214,11 +1215,11 @@ export class ExecutionModule implements RuntimeModule {
         return {
           order: { ...state.order },
           isCurrent: valid,
-          observe: async () => {
+          observe: async (absence) => {
             // A queued rearm can remove this owner before or during the exact read.
             return (
               acceptedTerminalId() ??
-              (await this.observeSubmitUnknownRecovery(state, valid)) ??
+              (await this.observeSubmitUnknownRecovery(state, valid, absence)) ??
               acceptedTerminalId()
             );
           },
@@ -1233,12 +1234,13 @@ export class ExecutionModule implements RuntimeModule {
   private async observeSubmitUnknownRecovery(
     state: ExactNullStartupQuarantineState,
     isCurrent: () => boolean,
+    absence?: ExchangeAbsenceEvidence,
   ): Promise<string | undefined> {
     const order = state.order;
     if (!isCurrent() || !order.exchangeOrderId || !this.deps.gateway.getOrderResult) return;
     const exact = await this.deps.gateway.getOrderResult(order.exchangeOrderId);
     if (!isCurrent() || !exact.ok) return;
-    return this.applySubmitUnknownRecoveryExact(state, exact.data, isCurrent);
+    return this.applySubmitUnknownRecoveryExact(state, exact.data, isCurrent, undefined, absence);
   }
 
   private async applySubmitUnknownRecoveryExact(
@@ -1246,6 +1248,7 @@ export class ExecutionModule implements RuntimeModule {
     exchange: ExchangeOrder | null,
     isCurrent: () => boolean,
     timestamp?: number,
+    absence?: ExchangeAbsenceEvidence,
   ): Promise<string | undefined> {
     const order = state.order;
     if (
@@ -1264,6 +1267,11 @@ export class ExecutionModule implements RuntimeModule {
       publish: true,
       ...(timestamp === undefined ? {} : { timestamp }),
       fillCompletionTolerance: this.deps.fillCompletionTolerance,
+      // Known exact matches not yet covered by persisted fills mean history is incomplete.
+      absence: absence && {
+        ...absence,
+        historyBackfilled: absence.historyBackfilled && !this.hasUncoveredKnownMatch(state),
+      },
       isCurrent,
       recoveryOwner: state.provenance === "startup-pending-buy" ? isCurrent : undefined,
       onVerdictApplied: (applied) =>
@@ -1295,13 +1303,22 @@ export class ExecutionModule implements RuntimeModule {
     if (
       exchange?.status === "OPEN" ||
       exchange?.status === "PARTIALLY_FILLED" ||
-      (state.knownMatchedShares !== undefined &&
-        !hasExactMatchedCoverage({ sizeFilled: state.knownMatchedShares }, gross))
+      this.hasUncoveredKnownMatch(state, gross)
     ) {
       delete state.acceptedTerminalRevision;
     } else if (verdict.status !== "unresolved" && isTerminalOrderStatus(verdict.status)) {
       state.acceptedTerminalRevision = this.cleanupLifecycleRevision;
     }
+  }
+
+  private hasUncoveredKnownMatch(
+    state: ExactNullStartupQuarantineState,
+    gross = persistedGrossShares(this.deps.fillRepo, state.order),
+  ): boolean {
+    return (
+      state.knownMatchedShares !== undefined &&
+      !hasExactMatchedCoverage({ sizeFilled: state.knownMatchedShares }, gross)
+    );
   }
 
   async observeExactNullStartupRemoteState(

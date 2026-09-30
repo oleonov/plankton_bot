@@ -38,6 +38,7 @@ import type {
 import {
   applyOrderVerdict,
   applyOrderVerdictInLane,
+  EXCHANGE_ABSENT_CANCEL_REASON,
   inOrderLifecycleLane,
   persistedGrossShares,
   resolveOrderStatusVerdict,
@@ -47,7 +48,6 @@ import {
   exchangeAbsenceCloseAtMs,
   lastActivityMs,
   readExchangeAbsence,
-  recordExactNullAbsence,
 } from "./exchange-absence.js";
 import {
   closeResolvedLosers,
@@ -204,10 +204,10 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   const quarantineOrders = localOrders.filter((order) =>
     deps.exactNullStartupQuarantine?.isExactNullStartupOrderQuarantined(order),
   );
-  const quarantineIds = new Set(quarantineOrders.map((order) => String(order.orderId)));
+  // Other startup-quarantined orders take the ordinary missing-order path to the absence rule.
+  const quarantineIds = new Set(recoveryContexts.map((context) => String(context.order.orderId)));
   const recoveredTerminalIds = new Set<string>();
   for (const context of recoveryContexts) {
-    quarantineIds.add(String(context.order.orderId));
     if (context.order.exchangeOrderId) localExchangeIds.add(context.order.exchangeOrderId);
   }
   await measureOrderStage(deps, "quarantineObservation", recoveryContexts.length, async () => {
@@ -219,7 +219,11 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
       await deps.exactNullStartupQuarantine!.observeExactNullStartupRemoteState(order, remoteState);
     }
     for (const context of recoveryContexts) {
-      const terminalId = await context.observe();
+      const terminalId = await context.observe({
+        snapshotAbsent: !exchangeOrderIds.has(String(context.order.exchangeOrderId)),
+        historyBackfilled:
+          deps.historyBackfilledOrderIds?.has(String(context.order.orderId)) ?? false,
+      });
       if (terminalId) recoveredTerminalIds.add(terminalId);
     }
   });
@@ -235,7 +239,16 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   });
 
   const fillRepo = deps.fillRepo ?? EMPTY_FILL_READER;
-  await clearReappearedAbsence(unresolved.reappeared, orderRepo, log);
+  const reappearedContextOrders = localOrders.filter(
+    (order) =>
+      quarantineIds.has(String(order.orderId)) &&
+      exchangeOrderIds.has(String(order.exchangeOrderId)),
+  );
+  await clearReappearedAbsence(
+    [...unresolved.reappeared, ...reappearedContextOrders],
+    orderRepo,
+    log,
+  );
   const exactNullIds = await measureOrderStage(
     deps,
     "exactCandidates",
@@ -395,10 +408,6 @@ async function applyExactCandidateInLane(
   exchange: ExchangeOrder | null,
   absenceTracked: boolean,
 ): Promise<void> {
-  const exchangeNullTerminal =
-    absenceTracked &&
-    recordExactNullAbsence(deps.orderRepo, deps.fillRepo, local.orderId, Date.now(), deps.log) &&
-    deps.historyBackfilledOrderIds.has(String(local.orderId));
   const verdict = await applyOrderVerdictInLane({
     orderRepo: deps.orderRepo,
     fillRepo: deps.fillRepo,
@@ -407,10 +416,14 @@ async function applyExactCandidateInLane(
     exchange,
     publish: true,
     fillCompletionTolerance: deps.fillCompletionTolerance,
-    exchangeNullTerminal,
+    absence: {
+      snapshotAbsent: absenceTracked,
+      historyBackfilled: deps.historyBackfilledOrderIds.has(String(local.orderId)),
+    },
     ...(deps.bus ? { bus: deps.bus } : {}),
   });
-  if (exchangeNullTerminal && verdict.status === "cancelled") logAbsenceTerminal(deps, local);
+  if (verdict.status === "cancelled" && verdict.reason === EXCHANGE_ABSENT_CANCEL_REASON)
+    logAbsenceTerminal(deps, local);
 }
 
 function logAbsenceTerminal(deps: ExactCandidateDeps, local: Order): void {

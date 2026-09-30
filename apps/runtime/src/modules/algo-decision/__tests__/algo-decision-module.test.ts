@@ -35,6 +35,7 @@ import { createTokenId, createCommandId, createOrderId, createPositionId } from 
 import type { ConditionId } from "@krabs/domain";
 import {
   BOUNCE_EXIT_TARGET_RULE_ID,
+  BOUNCE_EXIT_BACKSTOP_RULE_ID,
   DEFAULT_EXECUTION_POLICY,
   GATE_ENTRY_RULE_ID,
   S1_LADDER_RULE_ID,
@@ -10283,6 +10284,269 @@ describe("AlgoDecisionModule", () => {
       expect(decisionInput).not.toBeNull();
       expect(decisionInput!.hasActiveSellOrderForBounceBackstop).toBe(false);
       expect(decisionInput!.placedBounceRungIndices).toEqual([]);
+
+      await mod.stop();
+    });
+  });
+
+  // docs/plans/2026-09-30-bounce-rung-sell-capacity-storm.md — before this fix,
+  // a capacity-blocked ADDITIONAL BOUNCE_EXIT_TARGET rung was re-planned,
+  // logged, gate-evaluated and rejected on every sweep (~2s in prod, ~70
+  // tokens), writing ~2.2M decision_signal_log rows/day. The module now holds
+  // such a signal (via `bounceSellCapacityProbe`) instead of committing it,
+  // and only re-tries once a sweep's shared probe snapshot says capacity
+  // freed for that token.
+  describe("sell-storm capacity hold (docs/plans/2026-09-30-bounce-rung-sell-capacity-storm.md)", () => {
+    const bounceTokenId = "token-bounce-sell-capacity-hold";
+
+    function buildBounceRungFixture() {
+      const legState = makeSellReadyLegState(bounceTokenId, {
+        firstTradePrice: 0.008,
+        cumulativeBuySize: 31.85,
+        cumulativeBuyNotional: 0.2548,
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const position = makeOpenPosition(bounceTokenId, {
+        size: 31.85,
+        avgEntryPrice: 0.008,
+        costBasisUsdc: 0.2548,
+        exitOwner: "bounce",
+      });
+      const positionRepo = createPositionRepoForOpenPositions([position]);
+      const orderRepo: Partial<OrderRepository> = {
+        findByTokenId: vi.fn().mockReturnValue([]),
+        findRecentByTokenId: vi.fn().mockReturnValue([]),
+        findOpen: vi.fn().mockReturnValue([]),
+        hasNonterminalBounceAskCaptureIntentForPosition: vi.fn().mockReturnValue(false),
+      };
+      const fillRepo = {
+        findByOrderId: vi.fn().mockReturnValue([]),
+        findByOrderIds: vi.fn().mockReturnValue([]),
+      };
+      return { positionRepo, orderRepo, fillRepo };
+    }
+
+    function setBounceMarket(mod: AlgoDecisionModule) {
+      (mod as any).marketCache.set(bounceTokenId, {
+        ...makeMarket(bounceTokenId, null, 0.0275),
+        tickSize: 0.001,
+        minOrderSize: 5,
+        bestBid: 0.005,
+        bestAsk: 0.05,
+        spread: 0.045,
+      });
+    }
+
+    function collectSignalPayloads(): Array<{
+      signal: import("@krabs/domain").Signal;
+      market: NormalizedMarket;
+    }> {
+      const payloads: Array<{ signal: import("@krabs/domain").Signal; market: NormalizedMarket }> =
+        [];
+      (bus as any).subscribe(
+        "SignalProduced",
+        async (payload: { signal: import("@krabs/domain").Signal; market: NormalizedMarket }) => {
+          payloads.push(payload);
+        },
+      );
+      return payloads;
+    }
+
+    it("holds an additional rung while the probe reports blocked capacity: no SignalProduced/log insert, across repeated evaluations", async () => {
+      const { positionRepo, orderRepo, fillRepo } = buildBounceRungFixture();
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const probe = vi.fn().mockReturnValue({ allowed: false, perTokenOpenSellOrderCount: 1 });
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+        decisionSignalLogRepo,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        bounceSellCapacityProbe: probe,
+      });
+      await mod.start();
+      setBounceMarket(mod);
+      const payloads = collectSignalPayloads();
+
+      await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+      await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+      await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+
+      expect(payloads).toHaveLength(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+      expect(probe).toHaveBeenCalled();
+      expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(true);
+
+      await mod.stop();
+    });
+
+    it("re-emits once capacity frees, via a single sweep() and no market update", async () => {
+      const { positionRepo, orderRepo, fillRepo } = buildBounceRungFixture();
+      const probe = vi.fn().mockReturnValue({ allowed: false, perTokenOpenSellOrderCount: 1 });
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        bounceSellCapacityProbe: probe,
+      });
+      await mod.start();
+      setBounceMarket(mod);
+      // Neutralize the independent 60s full-sweep dirty-marking so the only
+      // thing that can make `sweep()` re-evaluate this token is the release
+      // path under test (mutation check (b): remove the sweep wake and this
+      // assertion catches it — nothing else would emit a signal here).
+      (mod as any).lastFullSweepAt = Date.now();
+      const payloads = collectSignalPayloads();
+
+      await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+      expect(payloads).toHaveLength(0);
+      expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(true);
+      // Isolate the release path under test: `evaluateTokens` was called
+      // directly above, but startup's open-position hydration already left
+      // this token in `dirtyTokenIds` — clear it so the only thing that can
+      // make `sweep()` re-evaluate the token is `releaseSellCapacityWaiters`.
+      (mod as any).dirtyTokenIds.clear();
+
+      probe.mockReturnValue({ allowed: true, perTokenOpenSellOrderCount: 1 });
+      await mod.sweep();
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]!.signal).toMatchObject({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      });
+      expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(false);
+
+      await mod.stop();
+    });
+
+    it("never holds a first exit (perTokenOpenSellOrderCount: 0) even when the probe reports not-allowed", async () => {
+      const { positionRepo, orderRepo, fillRepo } = buildBounceRungFixture();
+      const probe = vi.fn().mockReturnValue({ allowed: false, perTokenOpenSellOrderCount: 0 });
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        bounceSellCapacityProbe: probe,
+      });
+      await mod.start();
+      setBounceMarket(mod);
+      const payloads = collectSignalPayloads();
+
+      await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]!.signal).toMatchObject({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      });
+      expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(false);
+
+      await mod.stop();
+    });
+
+    it("never holds a BOUNCE_EXIT_BACKSTOP force-exit, regardless of the probe verdict", async () => {
+      const { positionRepo, orderRepo, fillRepo } = buildBounceRungFixture();
+      const probe = vi.fn().mockReturnValue({ allowed: false, perTokenOpenSellOrderCount: 1 });
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        bounceSellCapacityProbe: probe,
+      });
+      await mod.start();
+
+      const held = (mod as any).holdBounceRungForSellCapacity({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_BACKSTOP_RULE_ID,
+        market: { tokenId: createTokenId(bounceTokenId) },
+      });
+
+      expect(held).toBe(false);
+      expect(probe).not.toHaveBeenCalled();
+      expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(false);
+
+      await mod.stop();
+    });
+
+    it("race: the gate rejects for capacity right after the probe allowed it — at most one extra SignalProduced, then held", async () => {
+      vi.useFakeTimers();
+      try {
+        const { positionRepo, orderRepo, fillRepo } = buildBounceRungFixture();
+        const probe = vi.fn().mockReturnValue({ allowed: true, perTokenOpenSellOrderCount: 1 });
+        const mod = buildModule({
+          positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo: orderRepo as OrderRepository,
+          fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+          executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+          bounceSellCapacityProbe: probe,
+        });
+        await mod.start();
+        setBounceMarket(mod);
+        const payloads = collectSignalPayloads();
+
+        await mod.evaluateTokens([createTokenId(bounceTokenId)]);
+        expect(payloads).toHaveLength(1);
+
+        // The real risk gate now rejects it for wallet-SELL-capacity — a race
+        // against the probe's own answer a moment earlier.
+        probe.mockReturnValue({ allowed: false, perTokenOpenSellOrderCount: 1 });
+        await (bus as any).emit("SignalRejected", {
+          signal: payloads[0]!.signal,
+          market: payloads[0]!.market,
+          reason: "wallet_sell_capacity_exhausted",
+          rejectedAt: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(payloads).toHaveLength(1);
+        expect((mod as any).sellCapacityWaitTokenIds.has(bounceTokenId)).toBe(true);
+
+        await mod.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // Extra requirement (review): capacity is token-dependent, so releasing
+    // waiters must evaluate the probe PER token from ONE shared findOpen()
+    // snapshot — not admit every waiter just because one of them cleared, and
+    // not pay one findOpen() query per waiting token.
+    it("releaseSellCapacityWaiters evaluates each waiter from one shared findOpen() snapshot: only the admissible one is released", async () => {
+      const { positionRepo, fillRepo } = buildBounceRungFixture();
+      const snapshot = [{ orderId: "open-sell" }];
+      const findOpen = vi.fn().mockReturnValue(snapshot);
+      const orderRepo: Partial<OrderRepository> = { findOpen };
+      const probe = vi.fn(
+        (tokenId: unknown, _openOrders?: unknown) =>
+          String(tokenId) === "token-waiter-a"
+            ? { allowed: false, perTokenOpenSellOrderCount: 1 } // still blocked
+            : { allowed: true, perTokenOpenSellOrderCount: 1 }, // now admissible
+      );
+      const mod = buildModule({
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: orderRepo as OrderRepository,
+        fillRepo: fillRepo as unknown as import("@krabs/domain").FillRepository,
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        bounceSellCapacityProbe: probe,
+      });
+      await mod.start();
+      (mod as any).sellCapacityWaitTokenIds.add("token-waiter-a");
+      (mod as any).sellCapacityWaitTokenIds.add("token-waiter-b");
+      (mod as any).dirtyTokenIds.clear();
+
+      (mod as any).releaseSellCapacityWaiters();
+
+      expect(findOpen).toHaveBeenCalledTimes(1);
+      expect(probe).toHaveBeenCalledTimes(2);
+      for (const [, openOrders] of probe.mock.calls) expect(openOrders).toBe(snapshot);
+      expect((mod as any).sellCapacityWaitTokenIds.has("token-waiter-a")).toBe(true);
+      expect((mod as any).sellCapacityWaitTokenIds.has("token-waiter-b")).toBe(false);
+      expect((mod as any).dirtyTokenIds.has("token-waiter-a")).toBe(false);
+      expect((mod as any).dirtyTokenIds.has("token-waiter-b")).toBe(true);
 
       await mod.stop();
     });

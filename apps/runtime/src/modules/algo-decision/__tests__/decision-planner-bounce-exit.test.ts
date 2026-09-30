@@ -505,6 +505,41 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
     expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
   });
 
+  // docs/plans/2026-09-30-bounce-rung-sell-capacity-storm.md — the "phantom
+  // rung" storm emitter: execution's normalizeSellSizeForMinOrder absorbs a
+  // sub-minimum leftover into an earlier rung without marking that rung's
+  // index covered, so the next missing rung's own uncommittedRemainder is 0
+  // (every share is already committed to the earlier, enlarged order) and it
+  // would otherwise be explicitly sized to 0 and re-emitted on every update.
+  it("suppresses a maker_rung with zero uncommitted remainder instead of emitting a 0-share SELL (sellableFlow on)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0],
+        bounceLadderOpenCommitment: 100, // the entire sellable balance is already resting
+        executionPolicy: sellableFlowOnPolicy(),
+      }),
+    );
+    expect(result.type).toBe("none");
+    expect(result.suppressions.map((item) => item.reasonCode)).toContain(
+      "bounce-rung-no-uncommitted-remainder",
+    );
+  });
+
+  // The guard is gated on sellableFlowOn — GATE-lane flag-off byte-identity
+  // must be preserved: sizing keeps using the leg-level remainingPositionSize
+  // (100 here), which is > 0, so the identical inputs still emit normally.
+  it("does NOT suppress the same zero-fill-aware-remainder scenario when sellableFlow is off (flag-off byte-identity)", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0],
+        bounceLadderOpenCommitment: 100,
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(40, 10);
+  });
+
   it("normalizes the Mario supplemental rung before Risk without changing its target", () => {
     const result = evaluateDecisionPlan(
       input({

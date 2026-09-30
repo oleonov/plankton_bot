@@ -492,7 +492,7 @@ describe("exchange-absence terminal flag", () => {
     expect(absentTerminal(order, 100)).toEqual({ status: "filled" });
   });
 
-  it("never terminalizes an open pending-BUY recovery on the flag", () => {
+  it("terminalizes an open pending-BUY recovery on an exact null only with the flag", () => {
     const base = { ...order, exchangeOrderId: "order-1", positionId: createPositionId("pos-1") };
     const recovery: Order = {
       ...base,
@@ -508,7 +508,14 @@ describe("exchange-absence terminal flag", () => {
         },
       },
     };
-    expect(absentTerminal(recovery, 5)).toEqual({ status: "unresolved" });
+    expect(absentTerminal(recovery, 0)).toEqual({
+      status: "cancelled",
+      reason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+    expect(resolveOrderStatusVerdict(recovery, null, 0)).toEqual({ status: "unresolved" });
+    expect(
+      resolveOrderStatusVerdict(recovery, { status: "OPEN", sizeFilled: 0 }, 0, undefined, true),
+    ).toEqual({ status: "open" });
   });
 
   it("stores and publishes the absence reason over a leftover execution cancel intent", async () => {

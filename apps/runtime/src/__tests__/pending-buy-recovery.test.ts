@@ -20,6 +20,10 @@ import {
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
 import { runOwnershipInvariantStartupGate } from "../modules/exit-ownership/assert-bounce-for-all-invariant.js";
 import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
+import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
+import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
+import { readExchangeAbsence } from "../modules/reconciliation/exchange-absence.js";
+import { EXCHANGE_ABSENT_CANCEL_REASON } from "../modules/reconciliation/order-status-resolver.js";
 
 function fixture() {
   const f = pendingBuyFixture();
@@ -625,5 +629,255 @@ describe("durable pending BUY recovery", () => {
     expect(restarted.hasTransitionTarget(current(f, 1).orderId)).toBe(true);
     expect(restarted.getSubmitUnknownRecoveryContexts()).toHaveLength(1);
     expect(f.deps.orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(0.69);
+  });
+});
+
+describe("pending BUY recovery under the exchange-absence rule", () => {
+  const DAY = 24 * 60 * 60_000;
+  const absent = { snapshotAbsent: true, historyBackfilled: true };
+
+  /** Unknown BUY quiet for 8 days; created before adoption so the marker identity covers it. */
+  async function quietUnknown() {
+    const f = fixture();
+    const createdAt = new Date(Date.now() - 8 * DAY).toISOString();
+    f.conn.db.prepare("UPDATE orders SET created_at = ?, updated_at = ?").run(createdAt, createdAt);
+    const execution = await started(f);
+    const context = () =>
+      execution
+        .getSubmitUnknownRecoveryContexts()
+        .find((item) => item.order.orderId === current(f).orderId)!;
+    const seedAbsence = (firstNullAtMs: number) =>
+      f.deps.orderRepo.updateMetadata(current(f).orderId, {
+        ...current(f).metadata,
+        exchangeAbsenceV1: { firstNullAt: new Date(firstNullAtMs).toISOString() },
+      });
+    const cancelled: string[] = [];
+    f.bus.subscribe("OrderCancelled", async (event) => {
+      cancelled.push(`${String(event.orderId)}:${event.reason}`);
+    });
+    return { f, execution, context, seedAbsence, cancelled };
+  }
+
+  const firstNullAt = (f: ReturnType<typeof fixture>) =>
+    readExchangeAbsence(current(f))?.firstNullAtMs ?? null;
+  const expectRetained = (f: ReturnType<typeof fixture>, cancelled: string[]) => {
+    expect(readPendingBuyRecovery(current(f))!.completed).toBe(false);
+    expect(current(f).status).not.toBe("cancelled");
+    expect(cancelled).toEqual([]);
+    expect(f.deps.orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(1.38);
+  };
+
+  function reconciliation(f: ReturnType<typeof fixture>, execution: ExecutionModuleLike) {
+    return new ReconciliationModule({
+      gateway: f.gateway,
+      bus: f.bus,
+      orderRepo: f.deps.orderRepo,
+      fillRepo: f.deps.fillRepo,
+      marketRepo: f.deps.marketRepo,
+      log: f.deps.log,
+      reconcileIntervalMs: 60_000,
+      suspiciousEmptyThreshold: 0,
+      exactNullStartupQuarantine: execution,
+    });
+  }
+  type ExecutionModuleLike = Awaited<ReturnType<typeof started>>;
+
+  it("starts the marker on an exact null but keeps the recovery open under 24h", async () => {
+    const { f, context, cancelled } = await quietUnknown();
+    await context().observe(absent);
+    expect(firstNullAt(f)).not.toBeNull();
+    await context().observe(absent);
+    expectRetained(f, cancelled);
+  });
+
+  it("waits for a fetching reliable backfill pass, then completes the recovery as cancelled", async () => {
+    const { f, execution, seedAbsence, cancelled } = await quietUnknown();
+    const realNow = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(realNow);
+    onTestFinished(() => clock.mockRestore());
+    const mod = reconciliation(f, execution);
+    await mod.runReconciliation();
+    seedAbsence(realNow - 2 * DAY);
+    clock.mockReturnValue(realNow + 60_000);
+    await mod.runReconciliation(); // due, but the fills fetch is throttled
+    expectRetained(f, cancelled);
+    vi.mocked(f.gateway.getFillsResult!).mockResolvedValueOnce({
+      ok: false,
+      reason: "server",
+      attempts: 1,
+    } as never);
+    clock.mockReturnValue(realNow + 6 * 60_000);
+    await mod.runReconciliation(); // due, but the backfill read is unreliable
+    expectRetained(f, cancelled);
+    const quarantined = execution.getExactNullStartupQuarantineCount();
+
+    clock.mockReturnValue(realNow + 7 * 60_000);
+    await mod.runReconciliation();
+
+    expect(readPendingBuyRecovery(current(f))!.completed).toBe(true);
+    expect(current(f)).toMatchObject({
+      status: "cancelled",
+      cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+    });
+    expect(cancelled).toEqual([`${incidentIds[0]}:${EXCHANGE_ABSENT_CANCEL_REASON}`]);
+    expect(execution.getExactNullStartupQuarantineCount()).toBe(quarantined - 1);
+    expect(execution.hasTransitionTarget(current(f).orderId)).toBe(false);
+    expect(f.deps.orderRepo.sumOpenBuyNotional("remaining")).toBeCloseTo(0.69);
+    await execution.getSubmitUnknownRecoveryContexts()[0]!.applyExact(f.remote(1, "CANCELLED"));
+    expect(execution.isExactNullStartupTokenQuarantined(f.orders[0]!.tokenId)).toBe(false);
+  });
+
+  it.each(["matched above gross", "saved but unapplied fill"])(
+    "refuses absence completion with %s",
+    async (gap) => {
+      const { f, context, seedAbsence, cancelled } = await quietUnknown();
+      if (gap === "matched above gross")
+        f.deps.orderRepo.observePendingBuyRecovery(
+          current(f).orderId,
+          f.remote(0, "PARTIALLY_FILLED", 4),
+        );
+      else {
+        const quietFill = { ...f.fill(0, 4), timestamp: Date.now() - 8 * DAY + 1_000 };
+        await importExchangeFills([quietFill], { ...f.deps, bus: f.bus });
+      }
+      seedAbsence(Date.now() - 2 * DAY);
+      await context().observe(absent);
+      expect(readPendingBuyRecovery(current(f))!.completed).toBe(false);
+      expect(current(f).status).not.toBe("cancelled");
+      expect(cancelled).toEqual([]);
+    },
+  );
+
+  it("writes nothing without a current recovery owner", async () => {
+    const { f, execution, context, seedAbsence, cancelled } = await quietUnknown();
+    seedAbsence(Date.now() - 2 * DAY);
+    const verdict = await applyOrderVerdict({
+      ...f.deps,
+      bus: f.bus,
+      publish: true,
+      orderId: current(f).orderId,
+      exchange: null,
+      absence: absent,
+    });
+    expect(verdict).toEqual({ status: "unresolved" });
+    const snapshot = current(f);
+    expect(
+      await inOrderLifecycleLane(String(snapshot.orderId), () =>
+        persistTerminalVerdictInLane(
+          { ...f.deps, bus: f.bus, publish: true, orderId: snapshot.orderId, exchange: null },
+          snapshot,
+          { status: "cancelled", reason: EXCHANGE_ABSENT_CANCEL_REASON },
+          0,
+        ),
+      ),
+    ).toBe(false);
+    const stale = context();
+    await execution.stop();
+    vi.mocked(f.gateway.getOrderResult!).mockClear();
+    await stale.observe(absent);
+    expect(f.gateway.getOrderResult).not.toHaveBeenCalled();
+    expect(current(f)).toEqual(snapshot);
+    expectRetained(f, cancelled);
+  });
+
+  it("keeps the repository fail-closed around absence completion", async () => {
+    const { f, seedAbsence } = await quietUnknown();
+    const repo = f.deps.orderRepo;
+    const id = current(f).orderId;
+    expect(() => repo.updateStatus(id, "cancelled")).toThrow("protected");
+    expect(repo.completePendingBuyRecoveryAbsent(current(f), () => true)).toBe(false);
+    seedAbsence(Date.now() - 2 * DAY);
+    const snapshot = current(f);
+    expect(repo.completePendingBuyRecoveryAbsent({ ...snapshot, price: 0.007 }, () => true)).toBe(
+      false,
+    );
+    expect(repo.completePendingBuyRecoveryAbsent(snapshot, () => false)).toBe(false);
+    seedAbsence(Date.now() - DAY * 3);
+    expect(repo.completePendingBuyRecoveryAbsent(snapshot, () => true)).toBe(false);
+    expect(readPendingBuyRecovery(current(f))!.completed).toBe(false);
+    expect(repo.completePendingBuyRecoveryAbsent(current(f), () => true)).toBe(true);
+    expect(current(f).status).toBe("cancelled");
+  });
+
+  it("lets only a late fully covering fill move an absence-cancelled BUY to filled", async () => {
+    const { f, context, seedAbsence } = await quietUnknown();
+    seedAbsence(Date.now() - 2 * DAY);
+    await context().observe(absent);
+    const repo = f.deps.orderRepo;
+    const id = current(f).orderId;
+    expect(current(f).status).toBe("cancelled");
+    expect(() => repo.updateStatus(id, "open")).toThrow("protected");
+    expect(() => repo.updateStatus(id, "rejected")).toThrow("protected");
+    const received: string[] = [];
+    f.bus.subscribe("FillReceived", async (event) => void received.push(String(event.fillId)));
+
+    await importExchangeFills([f.fill(0, 114.99, "late-full")], { ...f.deps, bus: f.bus });
+
+    expect(current(f).status).toBe("filled");
+    expect(received).toEqual(["late-full"]);
+    expect(() => repo.updateStatus(id, "cancelled")).toThrow("protected");
+  });
+
+  it("never closes from a user-stream catch-up", async () => {
+    const { f, execution, seedAbsence, cancelled } = await quietUnknown();
+    const markedAt = Date.now() - 2 * DAY;
+    seedAbsence(markedAt);
+    const stream = new UserOrderStreamModule({
+      ...f.deps,
+      gateway: {
+        ...f.gateway,
+        createUserEventStream: () => ({ close: vi.fn(), setConditionIds: vi.fn() }),
+      } as never,
+      bus: f.bus,
+      exactNullStartupQuarantine: execution,
+    });
+    onTestFinished(() => stream.stop());
+    await stream.start();
+    expect(f.gateway.getOrderResult).toHaveBeenCalledWith(incidentIds[0]);
+    expect(firstNullAt(f)).toBe(markedAt);
+    expectRetained(f, cancelled);
+  });
+
+  it.each(["exact open", "snapshot presence"])("clears the marker on %s", async (sign) => {
+    const { f, execution, context, seedAbsence } = await quietUnknown();
+    seedAbsence(Date.now() - 2 * DAY);
+    if (sign === "exact open") {
+      f.observations.set(incidentIds[0], f.remote(0, "OPEN"));
+      await context().observe({ snapshotAbsent: false, historyBackfilled: true });
+    } else {
+      const listed = f.remote(0, "OPEN");
+      vi.mocked(f.gateway.getOpenOrdersResult!).mockResolvedValue({
+        ok: true,
+        data: [listed, f.remote(1)],
+      });
+      await reconcileOrders({
+        gateway: f.gateway,
+        orderRepo: f.deps.orderRepo,
+        fillRepo: f.deps.fillRepo,
+        log: f.deps.log,
+        bus: f.bus,
+        suspiciousEmptyThreshold: 0,
+        exactNullStartupQuarantine: execution,
+        historyBackfilledOrderIds: new Set([incidentIds[0]]),
+      });
+    }
+    expect(firstNullAt(f)).toBeNull();
+    expect(readPendingBuyRecovery(current(f))!.completed).toBe(false);
+  });
+
+  it("keeps the first exact-null time across a restart", async () => {
+    const { f, execution, context } = await quietUnknown();
+    await context().observe(absent);
+    const first = firstNullAt(f);
+    await execution.stop();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60 * 60_000);
+    onTestFinished(() => clock.mockRestore());
+    const restarted = await started(f);
+    await restarted
+      .getSubmitUnknownRecoveryContexts()
+      .find((item) => item.order.orderId === current(f).orderId)!
+      .observe(absent);
+    expect(firstNullAt(f)).toBe(first);
+    expect(readPendingBuyRecovery(current(f))!.completed).toBe(false);
   });
 });

@@ -85,7 +85,7 @@ function isOpenOrder(order: Order): boolean {
 }
 
 function getOpenOrderCounts(
-  orderRepo: OrderRepository,
+  orders: readonly Order[],
   tokenId: TokenId,
   excludeBounceTargetRungsForToken = false,
 ): OpenOrderCounts {
@@ -96,8 +96,7 @@ function getOpenOrderCounts(
   // to be cancelled by signal-to-order.ts, so it must not count against the
   // backstop's own per-token/wallet SELL capacity check — otherwise N resting
   // rungs at the cap would block the very force-exit meant to replace them.
-  const openOrders = orderRepo
-    .findOpen()
+  const openOrders = orders
     .filter(isOpenOrder)
     .filter((order) => !isExitRecoveryFencedPredecessor(order))
     .filter(
@@ -193,6 +192,57 @@ function getReplacementAwareSellCounts(
   };
 }
 
+// One copy for the gate and its probe, so the probe cannot drift from the gate's verdict.
+function evaluateSellCapacityForSignal(
+  counts: OpenOrderCounts,
+  sellCapacitySource: SellCapacitySource,
+  decisionRuleId: string | null,
+  sellPolicy: Parameters<typeof evaluateWalletSellCapacity>[0]["policy"],
+  profileOwnedOpenPositionCount: number,
+): {
+  sellCounts: SellCapacityCounts;
+  sellCapacity: ReturnType<typeof evaluateWalletSellCapacity>;
+} {
+  const sellCounts = getReplacementAwareSellCounts(counts, sellCapacitySource, decisionRuleId);
+  const sellCapacity = evaluateWalletSellCapacity({
+    policy: sellPolicy,
+    source: sellCapacitySource,
+    openSellOrderCount: sellCounts.openSellOrderCount,
+    openProfileLadderSellOrderCount: sellCounts.openProfileLadderSellOrderCount,
+    openNonProfileLadderSellOrderCount: sellCounts.openNonProfileLadderSellOrderCount,
+    profileOwnedOpenPositionCount,
+    perTokenOpenSellOrderCount: sellCounts.perTokenOpenSellOrderCount,
+  });
+  return { sellCounts, sellCapacity };
+}
+
+/** The gate's wallet-SELL-capacity verdict for a BOUNCE_EXIT_TARGET rung, without a signal. */
+export function probeBounceRungSellCapacity(args: {
+  orderRepo: Pick<OrderRepository, "findOpen">;
+  tokenId: TokenId;
+  policy: ExecutionPolicy | null | undefined;
+  profileOwnedOpenPositionCount: number;
+  openOrders?: readonly Order[] | undefined;
+}): { allowed: boolean; perTokenOpenSellOrderCount: number } {
+  const orders = args.openOrders ?? args.orderRepo.findOpen();
+  const counts = getOpenOrderCounts(orders, args.tokenId, false);
+  const sellPolicy = normalizeSellCapacityPolicy(args.policy?.sellCapacity);
+  const sellCapacitySource = classifySellCapacitySource({
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+  });
+  const { sellCounts, sellCapacity } = evaluateSellCapacityForSignal(
+    counts,
+    sellCapacitySource,
+    BOUNCE_EXIT_TARGET_RULE_ID,
+    sellPolicy,
+    args.profileOwnedOpenPositionCount,
+  );
+  return {
+    allowed: sellCapacity.allowed,
+    perTokenOpenSellOrderCount: sellCounts.perTokenOpenSellOrderCount,
+  };
+}
+
 export class AlgoRiskGateImpl implements RiskGate {
   constructor(
     private readonly orderRepo: OrderRepository,
@@ -220,7 +270,11 @@ export class AlgoRiskGateImpl implements RiskGate {
       side: signal.side,
       decisionRuleId: signal.decisionRuleId ?? null,
     });
-    const counts = getOpenOrderCounts(this.orderRepo, signal.tokenId, isBounceBackstopSignal);
+    const counts = getOpenOrderCounts(
+      this.orderRepo.findOpen(),
+      signal.tokenId,
+      isBounceBackstopSignal,
+    );
     const policy = this.executionPolicy?.();
     const market = this.marketRepo?.findByTokenId(signal.tokenId);
     const isBounceCleanupSignal =
@@ -291,20 +345,13 @@ export class AlgoRiskGateImpl implements RiskGate {
     // residual. `isBounceBackstopSignal` is computed once above from the same
     // `isBounceForceExit` helper used everywhere else this bypass applies.
     if (!isBuy) {
-      const sellCounts = getReplacementAwareSellCounts(
+      const { sellCounts, sellCapacity } = evaluateSellCapacityForSignal(
         counts,
         sellCapacitySource,
         signal.decisionRuleId ?? null,
+        sellPolicy,
+        this.profileOwnedOpenPositionCount?.() ?? 0,
       );
-      const sellCapacity = evaluateWalletSellCapacity({
-        policy: sellPolicy,
-        source: sellCapacitySource,
-        openSellOrderCount: sellCounts.openSellOrderCount,
-        openProfileLadderSellOrderCount: sellCounts.openProfileLadderSellOrderCount,
-        openNonProfileLadderSellOrderCount: sellCounts.openNonProfileLadderSellOrderCount,
-        profileOwnedOpenPositionCount: this.profileOwnedOpenPositionCount?.() ?? 0,
-        perTokenOpenSellOrderCount: sellCounts.perTokenOpenSellOrderCount,
-      });
       if (!sellCapacity.allowed && !isBounceBackstopSignal) {
         rejected.push(WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
         return finish(false, WALLET_SELL_CAPACITY_EXHAUSTED_REASON, sellCapacity);

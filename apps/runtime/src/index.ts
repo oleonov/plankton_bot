@@ -131,6 +131,7 @@ import { PermanentR23ActivationCoordinator } from "./permanent-r23-activation.js
 import { AuthoritativeTickResolver } from "./modules/execution/authoritative-tick-resolver.js";
 import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
+import { probeBounceRungSellCapacity } from "./modules/risk-inventory/algo-risk-gate.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
@@ -1594,6 +1595,14 @@ async function main(): Promise<void> {
     tradeCountProvider,
     priceHistoryProvider,
     executionPolicy: currentExecutionPolicy,
+    bounceSellCapacityProbe: (tokenId, openOrders) =>
+      probeBounceRungSellCapacity({
+        orderRepo: repos.order,
+        tokenId,
+        policy: currentExecutionPolicy(),
+        profileOwnedOpenPositionCount: countProfileOwnedOpenPositions(),
+        openOrders,
+      }),
     ...(requestMinOrderSizeHydration
       ? {
           requestMinOrderSizeHydration,

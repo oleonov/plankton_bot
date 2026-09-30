@@ -610,6 +610,18 @@ export interface AlgoDecisionModuleDeps {
    */
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   /**
+   * Would the risk gate's wallet-SELL-capacity check approve a BOUNCE_EXIT_TARGET
+   * rung for this token now? Lets additional rungs wait instead of being logged
+   * and rejected every pass (docs/plans/2026-09-30-bounce-rung-sell-capacity-storm.md).
+   * `openOrders` shares one `findOpen()` snapshot across tokens.
+   */
+  bounceSellCapacityProbe?:
+    | ((
+        tokenId: TokenId,
+        openOrders?: readonly Order[],
+      ) => { allowed: boolean; perTokenOpenSellOrderCount: number })
+    | undefined;
+  /**
    * Fire-and-forget request to fetch the REST order book for a token — the only
    * payload that carries `min_order_size` (the WSS `book` event omits it). Wired
    * to `CandidateBookCache.getFreshOrRefresh` in `index.ts`; the observed value
@@ -745,6 +757,7 @@ const EXACT_NULL_STARTUP_TRANSITION_BUY_SUPPRESSED_METRIC =
 const EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS = 5 * 60_000;
 const R23_PROBE_MAKER_WINDOW_CAP_COOLDOWN_METRIC =
   "r23_probe_maker_window_cap_cooldown_suppressed_total";
+const BOUNCE_RUNG_SELL_CAPACITY_HELD_METRIC = "bounce_rung_sell_capacity_held_total";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_MS = 15 * 60 * 1000;
 const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 const MAKER_WINDOW_CAP_MARKET_INVARIANT_REASONS: ReadonlySet<string> = new Set([
@@ -1109,6 +1122,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     { blockedUntilMs: number; policyFingerprint: string; reason: string }
   >();
   private readonly probeOpenPositionBlocks = new Map<string, string>();
+  /** Tokens whose additional bounce rung waits for SELL capacity; see releaseSellCapacityWaiters. */
+  private readonly sellCapacityWaitTokenIds = new Set<string>();
   private bounceTradingDisabledUntilMs = 0;
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1264,6 +1279,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.minOrderSizeRearmTokenIds.clear();
     this.r23ProbeMakerWindowCapCooldowns.clear();
     this.probeOpenPositionBlocks.clear();
+    this.sellCapacityWaitTokenIds.clear();
     this.bounceTradingDisabledUntilMs = 0;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
@@ -1923,6 +1939,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.markFullSweepDirty();
     }
     this.pruneR23ProbeNoOrderIdCooldowns(now);
+    this.releaseSellCapacityWaiters();
     await this.evaluateDirtyTokens();
   }
 
@@ -2165,6 +2182,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.observePostPlannerGuard(plan.signal, "exact_null_startup_transition");
         continue;
       }
+      if (this.holdBounceRungForSellCapacity(plan.signal)) continue;
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
         if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) {
@@ -2593,6 +2611,42 @@ export class AlgoDecisionModule implements RuntimeModule {
         cooldownUntilMs: this.buyBudgetCooldownUntilMs,
       }),
     );
+  }
+
+  /**
+   * Holds an additional BOUNCE_EXIT_TARGET rung the gate would reject for SELL
+   * capacity. First exits and backstops are never held: exit priority must not
+   * wait on capacity.
+   */
+  private holdBounceRungForSellCapacity(signal: DecisionSignalDraft): boolean {
+    const tokenKey = String(signal.market.tokenId);
+    if (signal.side !== "sell" || signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID) {
+      this.sellCapacityWaitTokenIds.delete(tokenKey);
+      return false;
+    }
+    const probe = this.deps.bounceSellCapacityProbe?.(signal.market.tokenId);
+    if (!probe || probe.perTokenOpenSellOrderCount <= 0 || probe.allowed) {
+      this.sellCapacityWaitTokenIds.delete(tokenKey);
+      return false;
+    }
+    this.sellCapacityWaitTokenIds.add(tokenKey);
+    this.observePostPlannerGuard(signal, "sell_capacity_held");
+    this.deps.runtimeMetrics?.writeCounter(BOUNCE_RUNG_SELL_CAPACITY_HELD_METRIC, 1);
+    return true;
+  }
+
+  /** Capacity is token-dependent (first-exit reserve), so each waiter is probed on its own. */
+  private releaseSellCapacityWaiters(): void {
+    if (this.sellCapacityWaitTokenIds.size === 0) return;
+    const probe = this.deps.bounceSellCapacityProbe;
+    if (!probe) return;
+    const openOrders = this.deps.orderRepo?.findOpen() ?? [];
+    for (const tokenKey of this.sellCapacityWaitTokenIds) {
+      const result = probe(tokenKey as TokenId, openOrders);
+      if (!result.allowed && result.perTokenOpenSellOrderCount > 0) continue;
+      this.sellCapacityWaitTokenIds.delete(tokenKey);
+      this.markDirty(tokenKey, "retry");
+    }
   }
 
   private shouldSkipFlatProbeForActiveMarketCap(

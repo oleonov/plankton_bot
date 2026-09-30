@@ -98,6 +98,8 @@ export interface ImportFillsResult {
   skipped: number;
   deferred: number;
   deferredFillIds: string[];
+  /** Orders with a deferred fill: their history is incomplete for the absence rule. */
+  deferredOrderIds: string[];
   details: string[];
 }
 
@@ -230,6 +232,7 @@ export async function importExchangeFills(
   let skipped = 0;
   let deferred = 0;
   const deferredFillIds: string[] = [];
+  const deferredOrderIds = new Set<string>();
   const details: string[] = [];
 
   const feeInfoByCondition = new Map<string, MarketFeeInfo | null>();
@@ -299,6 +302,7 @@ export async function importExchangeFills(
     ) {
       deferred++;
       deferredFillIds.push(ef.fillId);
+      deferredOrderIds.add(String(localOrder.orderId));
       const msg = `fill ${ef.fillId} exactly matches pending local order ${localOrder.orderId} — deferred until OrderPlaced`;
       details.push(msg);
       log.info({ fillId: ef.fillId, orderId: localOrder.orderId }, msg);
@@ -309,6 +313,7 @@ export async function importExchangeFills(
     if (recovery && !recoveryAllowed()) {
       deferred++;
       deferredFillIds.push(ef.fillId);
+      deferredOrderIds.add(String(localOrder.orderId));
       continue;
     }
     const resolved = buildLocalFillFromExchangeFill(ef, localOrder, undefined, feeInfo);
@@ -394,7 +399,14 @@ export async function importExchangeFills(
   }
 
   recordFillTiming(deps, "events", Date.now() - eventsStartedAt);
-  return { imported, skipped, deferred, deferredFillIds, details };
+  return {
+    imported,
+    skipped,
+    deferred,
+    deferredFillIds,
+    deferredOrderIds: [...deferredOrderIds],
+    details,
+  };
 }
 
 function recordFillTiming(
@@ -436,6 +448,8 @@ export interface FillReconcileResult {
   exchangeFillCount: number;
   missingFillsImported: number;
   details: string[];
+  /** See {@link ImportFillsResult.deferredOrderIds}. */
+  deferredOrderIds?: string[];
   /** Set when the pass bailed out before importing any fill. */
   skipReason?: "unreliable_fills";
   /** Fetch classification when {@link skipReason} is set. */
@@ -529,5 +543,6 @@ export async function reconcileFills(
     exchangeFillCount: exchangeFills.length,
     missingFillsImported: result.imported,
     details: result.details,
+    deferredOrderIds: result.deferredOrderIds,
   };
 }

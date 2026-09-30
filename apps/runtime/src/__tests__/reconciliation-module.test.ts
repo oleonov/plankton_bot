@@ -3405,6 +3405,23 @@ describe("ReconciliationModule — exchange-absence quarantine", () => {
     expect(zombie().status).toBe("partially-filled");
   });
 
+  it("does not terminalize a due pending order whose backfilled fill was deferred", async () => {
+    orders.updateStatus(ZOMBIE, "pending");
+    seedMarker(T0 - 2 * DAY);
+    const deferred = makeExchangeFill({
+      fillId: "deferred",
+      orderId: "zx",
+      side: "sell",
+      size: 2,
+      timestamp: CREATED + 1_000,
+    });
+    vi.mocked(gateway.getFills).mockResolvedValue([deferred]);
+    await passAt(newModule(), T0);
+    expect(fills.findByOrderId(ZOMBIE)).toEqual([]);
+    expect(marker()).toBe(T0 - 2 * DAY);
+    expect(zombie().status).toBe("pending");
+  });
+
   it("keeps a quarantine-only pass clean even when the quarantined order is past its TTL", async () => {
     const drift = vi.fn();
     bus.subscribe("ReconciliationDriftDetected", drift);

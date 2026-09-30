@@ -404,7 +404,7 @@ describe("reconcileOrders — Fix 2: suspicious empty snapshot", () => {
 });
 
 describe("reconcileOrders — missing-order evidence", () => {
-  it("partitions exact startup quarantine and observes only reliable remote state", async () => {
+  it("exact-reads an ownerless startup-quarantined order and observes reliable remote state", async () => {
     const orderRepo = createOrderRepo();
     const quarantined = makeLocalOrder({ exchangeOrderId: "ex-quarantine" });
     const ordinary = makeLocalOrder({
@@ -430,9 +430,12 @@ describe("reconcileOrders — missing-order evidence", () => {
     });
 
     expect(result.acknowledgedExternalStateUnknown).toBe(1);
-    expect(result.unresolvedMissingOnExchange).toBe(1);
-    expect(gateway.getOrderResult).toHaveBeenCalledTimes(1);
-    expect(gateway.getOrderResult).toHaveBeenCalledWith("ex-ordinary");
+    // Without a recovery owner it takes the ordinary path toward the exchange-absence rule.
+    expect(result.unresolvedMissingOnExchange).toBe(2);
+    expect(vi.mocked(gateway.getOrderResult).mock.calls.map(([id]) => id)).toEqual([
+      "ex-quarantine",
+      "ex-ordinary",
+    ]);
     expect(exactNullStartupQuarantine.observeExactNullStartupRemoteState).toHaveBeenCalledWith(
       quarantined,
       "absent",

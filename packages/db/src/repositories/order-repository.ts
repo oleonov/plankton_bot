@@ -15,6 +15,7 @@ import type {
   BounceAskCaptureBookDecisionProofV1,
   BounceAskCaptureSubmitProofV1,
   ExchangeOrder,
+  PendingBuyRecovery,
 } from "@krabs/domain";
 import { nowIso } from "../db-timestamp.js";
 import type {
@@ -37,6 +38,7 @@ import {
   readPendingBuyRecovery,
   pendingBuyIdentity,
   pendingBuyExactMatches,
+  EXCHANGE_ABSENCE_MARKER_KEY,
 } from "@krabs/domain";
 
 const OPEN_ORDER_PREDICATE = "status IN ('pending', 'open', 'partially-filled')";
@@ -142,6 +144,45 @@ export class SqliteOrderRepository implements OrderRepository {
     exact: Partial<ExchangeOrder>,
     isCurrent: () => boolean,
   ): boolean {
+    return this.completeRecovery(snapshot, isCurrent, (order, marker) => {
+      if (
+        !pendingBuyExactMatches(order, exact) ||
+        !["FILLED", "CANCELLED", "EXPIRED", "REJECTED"].includes(exact.status ?? "") ||
+        !this.hasRecoveryInventoryCoverage(order, exact, marker.matched)
+      )
+        return null;
+      const status =
+        exact.status === "FILLED"
+          ? "filled"
+          : exact.status === "REJECTED"
+            ? "rejected"
+            : "cancelled";
+      return { status, matched: Math.max(marker.matched, exact.sizeFilled!) };
+    });
+  }
+
+  completePendingBuyRecoveryAbsent(snapshot: Order, isCurrent: () => boolean): boolean {
+    return this.completeRecovery(snapshot, isCurrent, (order, marker) =>
+      snapshot.metadata?.[EXCHANGE_ABSENCE_MARKER_KEY] != null &&
+      this.hasRecoveryInventoryCoverage(
+        order,
+        { status: "CANCELLED", sizeFilled: marker.matched },
+        marker.matched,
+      )
+        ? { status: "cancelled", matched: marker.matched }
+        : null,
+    );
+  }
+
+  /** Marker completion and terminal status commit together, only against an unchanged snapshot. */
+  private completeRecovery(
+    snapshot: Order,
+    isCurrent: () => boolean,
+    evidence: (
+      order: Order,
+      marker: PendingBuyRecovery,
+    ) => { status: OrderStatus; matched: number } | null,
+  ): boolean {
     return this.db.transaction(() => {
       const order = this.findById(snapshot.orderId);
       const marker = order && readPendingBuyRecovery(order);
@@ -151,27 +192,15 @@ export class SqliteOrderRepository implements OrderRepository {
         marker.completed ||
         !isCurrent() ||
         pendingBuyIdentity(order) !== pendingBuyIdentity(snapshot) ||
-        JSON.stringify(order.metadata) !== JSON.stringify(snapshot.metadata) ||
-        !pendingBuyExactMatches(order, exact) ||
-        !["FILLED", "CANCELLED", "EXPIRED", "REJECTED"].includes(exact.status ?? "")
+        JSON.stringify(order.metadata) !== JSON.stringify(snapshot.metadata)
       )
         return false;
-      if (!this.hasRecoveryInventoryCoverage(order, exact, marker.matched) || !isCurrent())
-        return false;
-      const status =
-        exact.status === "FILLED"
-          ? "filled"
-          : exact.status === "REJECTED"
-            ? "rejected"
-            : "cancelled";
-      this.writeRecovery(order, {
-        ...marker,
-        matched: Math.max(marker.matched, exact.sizeFilled!),
-        completed: true,
-      });
+      const completion = evidence(order, marker);
+      if (!completion || !isCurrent()) return false;
+      this.writeRecovery(order, { ...marker, matched: completion.matched, completed: true });
       this.db
         .prepare("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?")
-        .run(status, nowIso(), order.orderId);
+        .run(completion.status, nowIso(), order.orderId);
       return true;
     })();
   }
@@ -221,7 +250,10 @@ export class SqliteOrderRepository implements OrderRepository {
       (marker &&
         (pendingBuyIdentity(current) !== pendingBuyIdentity(next) ||
           (!marker.completed && ["filled", "cancelled", "rejected"].includes(next.status)) ||
-          (marker.completed && next.status !== current.status)))
+          (marker.completed &&
+            next.status !== current.status &&
+            // A late fill with full local coverage may still prove a completed cancel filled.
+            !(current.status === "cancelled" && next.status === "filled"))))
     ) {
       throw new Error("protected pending BUY recovery write refused");
     }

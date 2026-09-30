@@ -81,7 +81,11 @@ import {
 import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
 import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
-import { inOrderLifecycleLane } from "../modules/reconciliation/order-status-resolver.js";
+import {
+  EXCHANGE_ABSENT_CANCEL_REASON,
+  inOrderLifecycleLane,
+} from "../modules/reconciliation/order-status-resolver.js";
+import { readExchangeAbsence } from "../modules/reconciliation/exchange-absence.js";
 import { discardStrandedFillAlert } from "../stranded-fill-alert.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
@@ -341,6 +345,21 @@ function expiredStartupMaker(): Order {
     createdAt: new Date(createdAtMs).toISOString(),
     updatedAt: new Date(createdAtMs).toISOString(),
   });
+}
+
+function makeExchangeOrderFor(order: Order, status: ExchangeOrder["status"]): ExchangeOrder {
+  return {
+    orderId: order.exchangeOrderId!,
+    clientOrderId: null,
+    tokenId: order.tokenId,
+    side: order.side,
+    price: order.price,
+    sizeTotal: order.size,
+    sizeFilled: 0,
+    sizeRemaining: order.size,
+    status,
+    createdAt: Date.parse(order.createdAt),
+  };
 }
 
 function drainTarget(
@@ -1418,6 +1437,9 @@ describe("ExecutionModule", () => {
         control,
         reconciliation,
         reconcile,
+        advance: (ms: number) => {
+          clockOffsetMs += ms;
+        },
         exchangeStateStore,
         reconcileDeps,
         fill,
@@ -2849,6 +2871,207 @@ describe("ExecutionModule", () => {
       } finally {
         await f.close();
       }
+    });
+
+    describe("exchange-absence closure", () => {
+      const DAY = 24 * 60 * 60_000;
+      const reservedSell = (f: Awaited<ReturnType<typeof recoveryFixture>>) =>
+        buildReservationSnapshot(f.orders.findOpen(), f.fills).reservedSellByToken.get(
+          f.pending.tokenId,
+        );
+
+      it("closes a quiet submit-unknown SELL under the full rule and not before", async () => {
+        const f = await recoveryFixture();
+        try {
+          const cancelled = vi.fn();
+          bus.subscribe("OrderCancelled", cancelled);
+          await f.reconcile();
+          expect(readExchangeAbsence(f.orders.findById(f.pending.orderId)!)).not.toBeNull();
+          f.advance(DAY);
+          await f.reconcile(); // 24h absent, but the order was active 2 days ago
+          expect(f.orders.findById(f.pending.orderId)?.status).toBe("pending");
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+          expect(cancelled).not.toHaveBeenCalled();
+          expect(reservedSell(f)).toBe(f.pending.size + f.sibling.size);
+
+          f.advance(5 * DAY);
+          await f.reconcile();
+
+          expect(f.orders.findById(f.pending.orderId)).toMatchObject({
+            status: "cancelled",
+            cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+          });
+          expect(cancelled).toHaveBeenCalledWith(
+            expect.objectContaining({
+              orderId: f.pending.orderId,
+              reason: EXCHANGE_ABSENT_CANCEL_REASON,
+            }),
+          );
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+          expect(f.owner.getExactNullStartupQuarantineCount()).toBe(0);
+          expect(reservedSell(f) ?? 0).toBeLessThanOrEqual(f.sibling.size);
+          expect(gateway.placeOrder).not.toHaveBeenCalled();
+        } finally {
+          await f.close();
+        }
+      });
+
+      it("does not close while exact-matched shares remain uncovered by fills", async () => {
+        const f = await recoveryFixture();
+        try {
+          await f.owner
+            .getSubmitUnknownRecoveryContexts()[0]!
+            .applyExact(terminalRemote(f, "PARTIALLY_FILLED", 2));
+          await f.reconcile();
+          f.advance(8 * DAY);
+          await f.reconcile();
+          await f.reconcile();
+          const row = f.orders.findById(f.pending.orderId)!;
+          expect(readExchangeAbsence(row)).not.toBeNull();
+          expect(row.status).not.toBe("cancelled");
+          expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
+        } finally {
+          await f.close();
+        }
+      });
+    });
+  });
+
+  describe("expired-maker startup quarantine under the exchange-absence rule", () => {
+    const DAY = 24 * 60 * 60_000;
+
+    async function expiredMakerFixture() {
+      const conn = bootstrapDatabase(":memory:");
+      const orders = new SqliteOrderRepository(conn.db);
+      const fills = new SqliteFillRepository(conn.db);
+      const base = expiredStartupMaker();
+      const createdAtMs = Date.now() - 8 * DAY;
+      const lifecycle = base.metadata!.makerMicroLiveLifecycle as Record<string, unknown>;
+      const pending: Order = {
+        ...base,
+        createdAt: new Date(createdAtMs).toISOString(),
+        updatedAt: new Date(createdAtMs).toISOString(),
+        metadata: {
+          makerMicroLiveLifecycle: {
+            ...lifecycle,
+            activatedAtUtc: new Date(createdAtMs - 1_000).toISOString(),
+          },
+        },
+      };
+      orders.save(pending);
+      const exact = vi.fn().mockResolvedValue({ ok: true, data: null });
+      const history = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      gateway.getOrderResult = exact;
+      gateway.getFillsResult = history;
+      gateway.getOpenOrdersResult = vi.fn().mockResolvedValue({ ok: true, data: [] });
+      gateway.cancelOrder = vi.fn().mockResolvedValue({ success: false });
+      const execution = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo: orders,
+        fillRepo: fills,
+        positionRepo: new SqlitePositionRepository(conn.db),
+        inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeMode: "live-lite",
+        runtimeControl: { isPaused: () => true },
+      });
+      execution.acknowledgeStartupTransitions([drainTarget(pending)]);
+      await execution.start();
+      await execution.seedStartupTransitions([drainTarget(pending)]);
+      const reconciliation = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo: orders,
+        fillRepo: fills,
+        marketRepo: marketRepo as any,
+        log: silentLog,
+        reconcileIntervalMs: 60_000,
+        suspiciousEmptyThreshold: 0,
+        exactNullStartupQuarantine: execution,
+      });
+      const realNow = Date.now.bind(Date);
+      let clockOffsetMs = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+      onTestFinished(async () => {
+        await reconciliation.stop();
+        await execution.stop();
+        conn.close();
+        clock.mockRestore();
+      });
+      const row = () => orders.findById(pending.orderId)!;
+      return {
+        pending,
+        fills,
+        execution,
+        exact,
+        history,
+        row,
+        quarantined: () => execution.isExactNullStartupOrderQuarantined(row()),
+        reconcile: async (advanceMs = 5 * 60_000) => {
+          clockOffsetMs += advanceMs;
+          return reconciliation.runReconciliation();
+        },
+      };
+    }
+
+    it("marks, closes, and releases a quiet expired maker", async () => {
+      const f = await expiredMakerFixture();
+      expect(f.quarantined()).toBe(true);
+      for (let pass = 0; pass < 3; pass++) await f.reconcile();
+      expect(readExchangeAbsence(f.row())).not.toBeNull();
+      expect(f.row().status).toBe("pending");
+      await f.reconcile(DAY);
+      expect(f.row()).toMatchObject({
+        status: "cancelled",
+        cancelReason: EXCHANGE_ABSENT_CANCEL_REASON,
+      });
+      expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+      expect(f.execution.getExactNullStartupQuarantineCount()).toBe(0);
+    });
+
+    it("closes through the standard verdict on an exact CANCELLED answer", async () => {
+      const f = await expiredMakerFixture();
+      f.exact.mockResolvedValue({
+        ok: true,
+        data: makeExchangeOrderFor(f.pending, "CANCELLED"),
+      });
+      for (let pass = 0; pass < 3; pass++) await f.reconcile();
+      // The startup drain's own cancel intent names the exact-confirmed cancellation.
+      expect(f.row()).toMatchObject({ status: "cancelled", cancelReason: "stale_entry_ttl" });
+      expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(false);
+    });
+
+    it("stays quarantined while a fill for it is deferred", async () => {
+      const f = await expiredMakerFixture();
+      f.history.mockResolvedValue({
+        ok: true,
+        data: [
+          {
+            fillId: "deferred-maker-fill",
+            orderId: f.pending.exchangeOrderId!,
+            clientOrderId: null,
+            tokenId: f.pending.tokenId,
+            side: "buy",
+            price: f.pending.price,
+            size: 110,
+            fee: 0,
+            feeRateBps: 0,
+            liquidityRole: "maker",
+            timestamp: Date.parse(f.pending.createdAt) + 1_000,
+          },
+        ],
+      });
+      for (let pass = 0; pass < 3; pass++) await f.reconcile();
+      await f.reconcile(DAY);
+      await f.reconcile();
+      expect(readExchangeAbsence(f.row())).not.toBeNull();
+      expect(f.row().status).toBe("pending");
+      expect(f.fills.findByOrderId(f.pending.orderId)).toEqual([]);
+      expect(f.quarantined()).toBe(true);
+      expect(f.execution.hasTransitionTarget(f.pending.orderId)).toBe(true);
     });
   });
 

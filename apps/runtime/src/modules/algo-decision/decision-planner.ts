@@ -1204,6 +1204,25 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
         return none(metrics, suppressions, sideEffects);
       }
       if (bounceDecision.intent === "maker_rung") {
+        // Execution may absorb a sub-minimum rung into an earlier one without
+        // marking its index covered; with zero uncommitted shares no rollover
+        // can size it, so it would otherwise be re-emitted as a 0-share rung.
+        if (sellableFlowOn && uncommittedRemainder <= 0) {
+          suppressions.push({
+            tokenId: market.tokenId,
+            conditionId: market.conditionId,
+            reasonCode: "bounce-rung-no-uncommitted-remainder",
+            side: "SELL",
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            state,
+            price: d8EvalPrice,
+            buyCount,
+            timeSinceLastSeconds,
+            emissionFacts,
+            timestamp: nowIso,
+          });
+          return none(metrics, suppressions, sideEffects);
+        }
         const bounceRung: BounceRungMetadata = {
           ladderId,
           rungIndex: bounceDecision.rungIndex,

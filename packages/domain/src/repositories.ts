@@ -308,6 +308,9 @@ export interface PendingBuyRecovery {
   completed: boolean;
 }
 
+/** Order-metadata key of the durable exchange-absence marker (`{ firstNullAt }`). */
+export const EXCHANGE_ABSENCE_MARKER_KEY = "exchangeAbsenceV1";
+
 export function pendingBuyIdentity(order: Order): string {
   return JSON.stringify([
     order.orderId,
@@ -397,6 +400,8 @@ export interface OrderRepository {
     exact: Partial<ExchangeOrder>,
     isCurrent: () => boolean,
   ): boolean;
+  /** Completes as cancelled on the exchange-absence rule; needs its marker and full coverage. */
+  completePendingBuyRecoveryAbsent?(order: Order, isCurrent: () => boolean): boolean;
   /** Persist a new order row. */
   save(order: Order): void;
 
