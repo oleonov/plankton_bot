@@ -122,6 +122,7 @@ import {
 import {
   BUY_ORDER_COUNT_LIMIT_REASON,
   PER_TOKEN_BUY_LIMIT_REASON,
+  PER_TOKEN_SELL_LIMIT_REASON,
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
@@ -874,7 +875,10 @@ const BUY_CAPACITY_REJECTION_REASONS = new Set([
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   "reserved-usdc-limit",
 ]);
-const SELL_RESIDUAL_REJECTION_REASONS = new Set([SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON]);
+const SELL_HELD_REJECTION_REASONS = new Set([
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  PER_TOKEN_SELL_LIMIT_REASON,
+]);
 const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 // CHANGE B — R67 spec 11.5 dust abandonment risk-event codes (kept colocated
@@ -1125,6 +1129,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly probeOpenPositionBlocks = new Map<string, string>();
   /** Tokens whose additional bounce rung waits for SELL capacity; see releaseSellCapacityWaiters. */
   private readonly sellCapacityWaitTokenIds = new Set<string>();
+  /** Tokens rejected for per_token_sell_limit; a cancel on the token frees a slot and re-arms it. */
+  private readonly sellSlotWaitTokenIds = new Set<string>();
   private bounceTradingDisabledUntilMs = 0;
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1281,6 +1287,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.r23ProbeMakerWindowCapCooldowns.clear();
     this.probeOpenPositionBlocks.clear();
     this.sellCapacityWaitTokenIds.clear();
+    this.sellSlotWaitTokenIds.clear();
     this.bounceTradingDisabledUntilMs = 0;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
@@ -1707,9 +1714,13 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
     if (openPositionBlocked) return;
     if (this.deferBuyCapacityRejection(payload.signal.side, payload.reason)) return;
-    // The gate's below-minimum verdict holds until a fill or a new minimum, and both re-arm the
+    // These verdicts hold until a fill, a cancel or a new minimum, and each of those re-arms the
     // token; an immediate retry would only repeat the rejection in a loop.
-    if (findBuyBudgetCooldownReason(payload.reason, SELL_RESIDUAL_REJECTION_REASONS)) return;
+    const heldReason = findBuyBudgetCooldownReason(payload.reason, SELL_HELD_REJECTION_REASONS);
+    if (heldReason === PER_TOKEN_SELL_LIMIT_REASON) {
+      this.sellSlotWaitTokenIds.add(String(payload.signal.tokenId));
+    }
+    if (heldReason) return;
     this.markDirty(payload.signal.tokenId, "retry");
     this.scheduleDirtyEvaluation(0);
   }
@@ -1765,7 +1776,10 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
-    if (this.isCurrentBounceTargetStaleTtlCancellation(payload)) {
+    if (
+      this.sellSlotWaitTokenIds.delete(String(payload.tokenId)) ||
+      this.isCurrentBounceTargetStaleTtlCancellation(payload)
+    ) {
       this.markDirty(payload.tokenId, "retry");
       this.scheduleDirtyEvaluation(0);
     }

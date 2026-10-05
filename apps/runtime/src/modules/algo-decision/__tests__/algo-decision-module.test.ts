@@ -6623,7 +6623,8 @@ describe("AlgoDecisionModule", () => {
     it.each([
       ["sell-residual-below-min-order-size", 1],
       ["per_token_sell_limit; sell-residual-below-min-order-size", 1],
-      ["per_token_sell_limit", 2],
+      ["per_token_sell_limit", 1],
+      ["wallet_sell_capacity_exhausted", 2],
     ])(
       "SELL rejected with %s re-arms the token only for a changeable verdict",
       async (reason, expectedLogRows) => {
@@ -6653,6 +6654,54 @@ describe("AlgoDecisionModule", () => {
         }
       },
     );
+
+    it("re-arms a per_token_sell_limit token only when a SELL on that token is cancelled", async () => {
+      vi.useFakeTimers();
+      const tokenId = "sell-slot-wait";
+      legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+      const decisionSignalLogRepo = { insert: vi.fn() };
+      const mod = buildModule({ decisionSignalLogRepo });
+      await mod.start();
+      const cancel = (cancelledTokenId: string) =>
+        (bus as any).emit("OrderCancelled", {
+          commandId: createCommandId(`cancel-${cancelledTokenId}`),
+          orderId: `sell-order-${cancelledTokenId}`,
+          tokenId: cancelledTokenId,
+          conditionId: "cond-1",
+          reason: "reprice",
+          signalReason: "repricing-exit",
+          timestamp: Date.now(),
+        });
+      try {
+        let rejectNext = true;
+        bus.subscribe("SignalProduced", async ({ signal }) => {
+          if (!rejectNext) return;
+          rejectNext = false;
+          await (bus as any).emit("SignalRejected", {
+            signal,
+            reason: "per_token_sell_limit",
+            rejectedAt: Date.now(),
+          });
+        });
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.12)],
+          timestamp: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+
+        await cancel("other-token");
+        await vi.advanceTimersByTimeAsync(300);
+        expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+
+        await cancel(tokenId);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(2);
+      } finally {
+        await mod.stop();
+        vi.useRealTimers();
+      }
+    });
 
     it("attributes reached BUY budget guards while preflighting each candidate", async () => {
       const tokenIds = ["target-budget-first", "target-budget-cooldown"];
