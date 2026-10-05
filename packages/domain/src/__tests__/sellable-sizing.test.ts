@@ -26,6 +26,14 @@ describe("resolveSellableShareFloor", () => {
     expect(resolveSellableShareFloor({ minOrderSize: 5, ladderFractions: [0.35, 0.65] })).toBe(18);
   });
 
+  it("lowers the entry floor from 20 to 6 shares when the ladder is one whole-inventory rung", () => {
+    // Accepted entry side effect of the single-rung exit (docs/plans/2026-10-05-single-rung-bounce-exit.md).
+    expect(resolveSellableShareFloor({ minOrderSize: 5, ladderFractions: [0.3, 0.4, 0.3] })).toBe(
+      20,
+    );
+    expect(resolveSellableShareFloor({ minOrderSize: 5, ladderFractions: [1] })).toBe(6);
+  });
+
   it("returns null for unknown/invalid minOrderSize (NEVER a fallback floor)", () => {
     expect(resolveSellableShareFloor({ minOrderSize: null, ladderFractions: FRACS })).toBeNull();
     expect(

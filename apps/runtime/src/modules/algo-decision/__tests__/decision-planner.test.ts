@@ -909,6 +909,33 @@ describe("evaluateDecisionPlan", () => {
     );
   });
 
+  it("suppresses a SELL on a dust position while the planner's minimum is unknown", () => {
+    const evaluate = (status: Position["status"]) =>
+      evaluateDecisionPlan(
+        input({
+          selectedForEntry: false,
+          legState: leg({ buyCount: 1 }),
+          position: position({ size: 1.7, status }),
+          market: market({ bestBid: 0.2, bestAsk: 0.21, midPrice: 0.205, minOrderSize: null }),
+        }),
+      );
+    const residualReasons = (result: ReturnType<typeof evaluateDecisionPlan>) =>
+      result.suppressions
+        .map((item) => item.reasonCode)
+        .filter((reason) => reason.startsWith("sell-residual-"));
+
+    const dust = evaluate("dust");
+    expect(dust.type).toBe("none");
+    expect(residualReasons(dust)).toEqual(["sell-residual-unknown-min"]);
+    expect(dust.sideEffects).not.toContainEqual(
+      expect.objectContaining({ kind: "sell_residual_reject" }),
+    );
+
+    const open = evaluate("open");
+    expect(open.type).toBe("signal");
+    expect(residualReasons(open)).toEqual([]);
+  });
+
   it("returns a side-effect request instead of mutating dust counters in the planner", () => {
     const result = evaluateDecisionPlan(
       input({

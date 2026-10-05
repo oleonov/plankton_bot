@@ -874,6 +874,7 @@ const BUY_CAPACITY_REJECTION_REASONS = new Set([
   TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   "reserved-usdc-limit",
 ]);
+const SELL_RESIDUAL_REJECTION_REASONS = new Set([SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON]);
 const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 // CHANGE B — R67 spec 11.5 dust abandonment risk-event codes (kept colocated
@@ -1706,6 +1707,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
     if (openPositionBlocked) return;
     if (this.deferBuyCapacityRejection(payload.signal.side, payload.reason)) return;
+    // The gate's below-minimum verdict holds until a fill or a new minimum, and both re-arm the
+    // token; an immediate retry would only repeat the rejection in a loop.
+    if (findBuyBudgetCooldownReason(payload.reason, SELL_RESIDUAL_REJECTION_REASONS)) return;
     this.markDirty(payload.signal.tokenId, "retry");
     this.scheduleDirtyEvaluation(0);
   }
@@ -4592,12 +4596,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private getCachedPosition(tokenId: TokenId): Position | null {
     const key = String(tokenId);
     if (this.positionCache.has(key)) return this.positionCache.get(key) ?? null;
-    if (this.positionCacheHydrated) {
-      const openPosition = this.findOpenPositionByTokenId(tokenId);
-      if (openPosition) return openPosition;
-      this.positionCache.set(key, null);
-      return null;
-    }
+    // Hydration loads only open rows, so a dust row (non-closed, as the risk gate reads it)
+    // must come from the repository or the planner would see no position after a restart.
     const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
     this.positionCache.set(key, position);
     return position;

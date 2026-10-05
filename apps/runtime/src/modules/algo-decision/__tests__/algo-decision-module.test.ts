@@ -3837,6 +3837,87 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it.each([
+    ["no execution policy", undefined],
+    ["dust abandonment enabled", () => DEFAULT_EXECUTION_POLICY],
+  ])(
+    "suppresses SELL on a dust position after a restart without a known minimum (%s)",
+    async (_label, executionPolicy) => {
+      const tokenId = "token-restart-dust";
+      const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      legStateRepo = createMockLegStateRepo([
+        {
+          tokenId: createTokenId(tokenId),
+          buyCount: 1,
+          sellCount: 0,
+          lastAction: "BUY",
+          firstTradePrice: 0.1,
+          firstTradeAt: nowIso,
+          lastTradeAt: nowIso,
+          updatedAt: nowIso,
+        },
+      ]);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      // Startup hydration reads only open rows; the dust row is visible by token lookup alone.
+      const positionRepo = {
+        findOpen: vi.fn().mockReturnValue([]),
+        findByTokenId: vi
+          .fn()
+          .mockReturnValue({ size: 1.7, avgEntryPrice: 0.2, status: "dust", side: "buy" }),
+      };
+      const requestMinOrderSizeHydration = vi.fn();
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        requestMinOrderSizeHydration,
+        riskEventRepo,
+        positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+        ...(executionPolicy ? { executionPolicy } : {}),
+      });
+      await mod.start();
+
+      const market = {
+        ...makeMarket(tokenId, null, 0.15, "cond-restart-dust"),
+        tradable: false,
+        minOrderSize: null,
+      };
+      const signalCount = () =>
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([ev]) => ev === "SignalProduced",
+        ).length;
+      const residualSuppressions = () =>
+        vi
+          .mocked(riskEventRepo.insert)
+          .mock.calls.filter(([event]) => event.payload.reasonCode === "sell-residual-unknown-min");
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+      expect(residualSuppressions()).toHaveLength(1);
+      expect(requestMinOrderSizeHydration).toHaveBeenCalledWith(tokenId);
+      expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
+      expect(signalCount()).toBe(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+      expect(signalCount()).toBe(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+
+      // A learned minimum the residual clears makes it sellable: the leg must still be there.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [{ ...market, minOrderSize: 1 }],
+        timestamp: Date.now(),
+      });
+      expect(signalCount()).toBe(1);
+
+      await mod.stop();
+    },
+  );
+
   it("suppresses SELL during the post-BUY fill cooldown", async () => {
     const tokenId = "token-post-buy-cooldown";
     legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
@@ -6532,6 +6613,40 @@ describe("AlgoDecisionModule", () => {
           expect((mod as any).pendingEntries.has(tokenId)).toBe(true);
           expect((mod as any).buyBudgetCooldownUntilMs).toBe(until);
           expect(canAttemptBuy.mock.calls.slice(1).every(([amount]) => amount === 0.99)).toBe(true);
+        } finally {
+          await mod.stop();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([
+      ["sell-residual-below-min-order-size", 1],
+      ["per_token_sell_limit; sell-residual-below-min-order-size", 1],
+      ["per_token_sell_limit", 2],
+    ])(
+      "SELL rejected with %s re-arms the token only for a changeable verdict",
+      async (reason, expectedLogRows) => {
+        vi.useFakeTimers();
+        const tokenId = "residual-rejected";
+        legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+        const decisionSignalLogRepo = { insert: vi.fn() };
+        const mod = buildModule({ decisionSignalLogRepo });
+        await mod.start();
+        try {
+          let rejectNext = true;
+          bus.subscribe("SignalProduced", async ({ signal }) => {
+            if (!rejectNext) return;
+            rejectNext = false;
+            await (bus as any).emit("SignalRejected", { signal, reason, rejectedAt: Date.now() });
+          });
+          await (bus as any).emit("NormalizedMarketUpdated", {
+            markets: [makeMarket(tokenId, null, 0.12)],
+            timestamp: Date.now(),
+          });
+          expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+          for (let turn = 0; turn < 3; turn++) await vi.advanceTimersByTimeAsync(300);
+          expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(expectedLogRows);
         } finally {
           await mod.stop();
           vi.useRealTimers();

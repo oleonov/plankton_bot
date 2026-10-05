@@ -2027,12 +2027,8 @@ function buildSignalOrSuppression(args: {
   }
 
   if (
-    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID &&
-    decision.bounceRung &&
-    !decision.bounceRung.isCleanupRung &&
-    input.hasWorkingBounceCleanup &&
-    decision.bounceRung.uncommittedRemainder != null &&
-    input.minOrderSizeHydrationAvailable === true &&
+    (isSupplementalRungAwaitingMinimum(decision, input) ||
+      isDustSellAwaitingMinimum(decision, input.position)) &&
     !isKnownMinOrderSize(market.minOrderSize)
   ) {
     args.suppressions.push({
@@ -2532,6 +2528,32 @@ function evaluateDropGate(
   }
   metrics.dropTriggerPassed++;
   return { allowed: true, status: "passed", priceDropPct };
+}
+
+type PlannedDecision = {
+  action: TradeDecisionAction;
+  ruleId: string;
+  bounceRung?: BounceRungMetadata;
+};
+
+function isSupplementalRungAwaitingMinimum(
+  decision: PlannedDecision,
+  input: DecisionPlanningInput,
+): boolean {
+  return (
+    decision.ruleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+    decision.bounceRung != null &&
+    !decision.bounceRung.isCleanupRung &&
+    input.hasWorkingBounceCleanup === true &&
+    decision.bounceRung.uncommittedRemainder != null &&
+    input.minOrderSizeHydrationAvailable === true
+  );
+}
+
+// `dust` is the ledger's own below-exchange-minimum verdict. The planner forgets the minimum on
+// restart, so hold the SELL and let the minimum be fetched rather than emit one the gate rejects.
+function isDustSellAwaitingMinimum(decision: PlannedDecision, position: Position | null): boolean {
+  return decision.action === "SELL" && position?.status === "dust";
 }
 
 function shouldSuppressSellResidualBelowMinSize(

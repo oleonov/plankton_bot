@@ -370,6 +370,25 @@ describe("bounceExit — ladderFractions validation", () => {
     expect(result.policy.bounceExit.ladderFractions).toEqual([0.5, 0.5]);
   });
 
+  it("keeps an enabled ladder active with a single whole-inventory rung", () => {
+    const result = parseExecutionPolicyJson(
+      JSON.stringify({
+        bounceExit: {
+          ...DEFAULT_BOUNCE_EXIT,
+          enabled: true,
+          mode: "micro_live",
+          ladderFractions: [1],
+        },
+      }),
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.policy.bounceExit).toMatchObject({
+      enabled: true,
+      mode: "micro_live",
+      ladderFractions: [1],
+    });
+  });
+
   it("accepts fractions within the 0.001 sum tolerance", () => {
     const result = parseExecutionPolicyJson(
       JSON.stringify({ bounceExit: { ladderFractions: [0.3, 0.4, 0.3009] } }),

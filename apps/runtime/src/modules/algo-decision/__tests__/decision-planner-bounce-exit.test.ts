@@ -784,6 +784,53 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
   });
 });
 
+// docs/plans/2026-10-05-single-rung-bounce-exit.md: plankton sells the whole inventory in one
+// event at the first target, so the live ladder becomes one rung. Each case pins a price/size the
+// three-rung ladder would not produce.
+describe("single-rung ladder [1] (operator 2026-10-05)", () => {
+  const singleRungPolicy = () =>
+    sellableFlowOnPolicy({ bounceExit: { ...ENABLED_BOUNCE_EXIT, ladderFractions: [1] } });
+
+  it("emits rung0 at the first tier target for the whole inventory", () => {
+    const result = evaluateDecisionPlan(input({ executionPolicy: singleRungPolicy() }));
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(100, 10);
+    expect(result.signal.bounceRung).toMatchObject({ rungIndex: 0, fraction: 1 });
+  });
+
+  it("offers what the $2 cap clipped from rung0 as a cap-exempt cleanup at the same price", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0],
+        bounceLadderOpenCommitment: 16,
+        executionPolicy: singleRungPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(84, 10);
+    expect(result.signal.bounceRung).toMatchObject({ rungIndex: 0, isCleanupRung: true });
+  });
+
+  it("moves a legacy three-rung remainder to rung0's price once the old rungs are gone", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 30,
+        executionPolicy: singleRungPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(70, 10);
+    expect(result.signal.bounceRung).toMatchObject({ rungIndex: 0, isCleanupRung: true });
+  });
+});
+
 describe("bounce-exit BACKSTOP branch (decision-planner) — Phase 3 GATE-scoped wrapper", () => {
   // Near-resolution (1h to close, well inside the default 24h backstopTtcHours)
   // + bestBid at avgEntry (Q.D Mode A) — the shape the GATE-scoped wrapper
