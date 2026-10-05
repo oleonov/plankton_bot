@@ -3173,6 +3173,144 @@ describe("ExecutionModule", () => {
     await f.execution.stop();
   });
 
+  // Prod 4442605…: three working rungs fill the per-token cap max(2, 3); the cleanup for the
+  // uncovered remainder needs its cleanup slot even after the bridge's initial ask capture.
+  const CAPTURED_ANCHOR = 0.012;
+
+  function capturedRung(rungIndex: number, uncommittedRemainder: number, cleanup = false) {
+    return {
+      ladderId: "md-08-captured",
+      rungIndex,
+      anchorPrice: CAPTURED_ANCHOR,
+      fraction: cleanup ? 1 : [0.3, 0.4, 0.3][rungIndex]!,
+      originalPositionSize: 30,
+      remainingPositionSize: 80,
+      uncommittedRemainder,
+      ...(cleanup ? { isCleanupRung: true } : {}),
+    };
+  }
+
+  function seedCapturedLadderRungs(position: Position) {
+    trackPreparedRows(
+      orderRepo,
+      [0, 1, 2].map((index) =>
+        openSellAt(
+          bounceTarget(DEFAULT_EXECUTION_POLICY.bounceExit, CAPTURED_ANCHOR, index, 0.001),
+          {
+            orderId: createOrderId(`captured-rung-${index}`),
+            clientOrderId: `captured-rung-${index}` as ClientOrderId,
+            exchangeOrderId: `captured-rung-${index}`,
+            positionId: position.positionId,
+            size: 10,
+            postOnly: true,
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            metadata: { bounceRung: capturedRung(index, 10) },
+          },
+        ),
+      ),
+    );
+  }
+
+  function capturedCleanupCommand(position: Position, capture: Record<string, unknown> | null) {
+    const target = bounceTarget(DEFAULT_EXECUTION_POLICY.bounceExit, CAPTURED_ANCHOR, 2, 0.001);
+    const price = Math.round((target + 0.1) * 1000) / 1000;
+    return makePlaceCmd({
+      side: "sell",
+      size: 50,
+      price,
+      tickSize: 0.001,
+      postOnly: true,
+      entryStyle: "maker",
+      signalReason: "repricing-exit",
+      positionId: position.positionId,
+      decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+      metadata: {
+        marketData: { minOrderSize: 5 },
+        bounceRung: capturedRung(2, 50, true),
+        ...(capture ? { bounceAskCaptureInitialV1: { version: 1, price, ...capture } } : {}),
+      },
+    });
+  }
+
+  function capturedLiveExecution(
+    position: Position,
+    positionRepo: ReturnType<typeof createMockPositionRepo>,
+  ) {
+    const store = new ExchangeStateStore();
+    store.updateWalletPosition(position.tokenId, position.size);
+    return new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      exchangeStateStore: store,
+      tickResolver: { resolve: vi.fn().mockResolvedValue(0.001), invalidate: vi.fn() } as any,
+    });
+  }
+
+  function askCapturedCleanupFixture(
+    positionSize: number,
+    capture: Record<string, unknown> | null,
+  ) {
+    const position = makePosition({
+      size: positionSize,
+      avgEntryPrice: CAPTURED_ANCHOR,
+      costBasisUsdc: positionSize * CAPTURED_ANCHOR,
+      exitOwner: "bounce",
+    });
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn(() => [position]);
+    seedCapturedLadderRungs(position);
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockResolvedValue(positionSize);
+    const execution = capturedLiveExecution(position, positionRepo);
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => {
+      rejected.push(event.reason);
+    });
+    return { execution, command: capturedCleanupCommand(position, capture), rejected };
+  }
+
+  it.each([
+    ["applied capture at the command price", 80, { status: "applied", reason: "applied" }, []],
+    ["no capture marker", 80, null, ["per_token_sell_limit"]],
+    [
+      "capture marker at another price",
+      80,
+      { status: "applied", reason: "applied", price: 0.5 },
+      ["per_token_sell_limit"],
+    ],
+    [
+      "skipped capture marker",
+      80,
+      { status: "skipped", reason: "no-valid-move" },
+      ["per_token_sell_limit"],
+    ],
+    [
+      "applied capture above sellable inventory",
+      75,
+      { status: "applied", reason: "applied" },
+      ["exit-coverage-cleanup-state-changed"],
+    ],
+  ])(
+    "ask-captured bounce cleanup with %s",
+    async (_name, positionSize, capture, expectedRejections) => {
+      const f = askCapturedCleanupFixture(positionSize, capture);
+      await f.execution.start();
+      await bus.publish("PlaceOrderRequested", { command: f.command, timestamp: Date.now() });
+      expect(f.rejected).toEqual(expectedRejections);
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(expectedRejections.length ? 0 : 1);
+      await f.execution.stop();
+    },
+  );
+
   it("market liveness proof unblocks the BTC cleanup without refreshing its quote", async () => {
     const f = preciseCleanupFixture();
     const market = makeNormalizedMarket({

@@ -618,9 +618,26 @@ function isExactBounceCleanup(
     (1 + bounceExitTierGain(policy, rung.anchorPrice)) *
       Math.pow(1 + policy.ladderStepPct, lastIndex) -
     1;
-  return sameNumber(
-    candidate.price,
+  return matchesBounceCleanupPrice(
+    candidate,
     computeHarvestTarget(rung.anchorPrice, gain, candidate.tickSize),
+  );
+}
+
+// The bridge's initial ask capture lifts the cleanup above its target before execution sees it;
+// the risk gate classified the pre-capture price, so execution must keep the same cleanup slot.
+function matchesBounceCleanupPrice(
+  candidate: ExitCoverageCleanupCandidate,
+  target: number,
+): boolean {
+  if (sameNumber(candidate.price, target)) return true;
+  const capture = candidate.metadata?.bounceAskCaptureInitialV1;
+  return (
+    isRecord(capture) &&
+    capture.status === "applied" &&
+    isPositive(capture.price) &&
+    sameNumber(capture.price, candidate.price) &&
+    candidate.price > target + EPSILON
   );
 }
 
