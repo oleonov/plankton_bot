@@ -7767,3 +7767,57 @@ describe("SignalToOrderBridge Track A add-throttle live enforcement", () => {
     );
   });
 });
+
+describe("SignalToOrderBridge — bounce rollover keeps the ladder's pinned shape", () => {
+  it("rolls an un-stamped legacy rung over the legacy 30/40/30 indices under a single-rung policy", async () => {
+    const bus = new InProcessEventBus();
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: {
+        ...DEFAULT_EXECUTION_POLICY.bounceExit,
+        mode: "micro_live",
+        microMaxOrderUsdc: 20,
+        ladderFractions: [1],
+      },
+    };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "eoa" } as never,
+      policy: () => policy,
+      now: () => NOW,
+    });
+    bridge.subscribe();
+    const placed: RuntimeEventMap["PlaceOrderRequested"][] = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => void placed.push(payload));
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        suggestedPrice: 0.15,
+        suggestedSize: 30,
+        suggestedSizeUsdc: 4.5,
+        bounceRung: {
+          ladderId: "legacy-ladder",
+          rungIndex: 0,
+          anchorPrice: 0.1,
+          fraction: 0.3,
+          originalPositionSize: 100,
+          remainingPositionSize: 100,
+        },
+      },
+      market: makeMarket({ bestBid: 0.1, bestAsk: 0.2, midPrice: 0.15, minOrderSize: 50 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.size).toBeCloseTo(70, 5);
+    expect(placed[0]!.command.metadata?.bounceRung).toMatchObject({
+      fraction: 0.7,
+      rungIndicesCovered: [0, 1],
+    });
+  });
+});

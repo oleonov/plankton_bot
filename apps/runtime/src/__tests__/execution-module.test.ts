@@ -45,6 +45,7 @@ import type {
   NormalizedMarket,
   RiskEventRepository,
   Signal,
+  ExecutionPolicy,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import {
@@ -3235,6 +3236,7 @@ describe("ExecutionModule", () => {
   function capturedLiveExecution(
     position: Position,
     positionRepo: ReturnType<typeof createMockPositionRepo>,
+    policy: ExecutionPolicy = DEFAULT_EXECUTION_POLICY,
   ) {
     const store = new ExchangeStateStore();
     store.updateWalletPosition(position.tokenId, position.size);
@@ -3250,7 +3252,7 @@ describe("ExecutionModule", () => {
       botRunId: BOT_RUN_ID,
       runtimeMode: "live-lite",
       runtimeControl: { isPaused: () => false },
-      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      executionPolicy: () => policy,
       exchangeStateStore: store,
       tickResolver: { resolve: vi.fn().mockResolvedValue(0.001), invalidate: vi.fn() } as any,
     });
@@ -3259,6 +3261,7 @@ describe("ExecutionModule", () => {
   function askCapturedCleanupFixture(
     positionSize: number,
     capture: Record<string, unknown> | null,
+    policy: ExecutionPolicy = DEFAULT_EXECUTION_POLICY,
   ) {
     const position = makePosition({
       size: positionSize,
@@ -3270,7 +3273,7 @@ describe("ExecutionModule", () => {
     positionRepo.findActiveByTokenId = vi.fn(() => [position]);
     seedCapturedLadderRungs(position);
     (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockResolvedValue(positionSize);
-    const execution = capturedLiveExecution(position, positionRepo);
+    const execution = capturedLiveExecution(position, positionRepo, policy);
     const rejected: string[] = [];
     bus.subscribe("OrderRejected", async (event) => {
       rejected.push(event.reason);
@@ -3310,6 +3313,22 @@ describe("ExecutionModule", () => {
       await f.execution.stop();
     },
   );
+
+  it("admits a legacy ladder cleanup beside its three legacy rungs under a single-rung policy", async () => {
+    const f = askCapturedCleanupFixture(
+      80,
+      { status: "applied", reason: "applied" },
+      {
+        ...DEFAULT_EXECUTION_POLICY,
+        bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, ladderFractions: [1] },
+      },
+    );
+    await f.execution.start();
+    await bus.publish("PlaceOrderRequested", { command: f.command, timestamp: Date.now() });
+    expect(f.rejected).toEqual([]);
+    expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+    await f.execution.stop();
+  });
 
   it("market liveness proof unblocks the BTC cleanup without refreshing its quote", async () => {
     const f = preciseCleanupFixture();
@@ -12674,6 +12693,7 @@ describe("ExecutionModule", () => {
       let preparedOrderId = "recovery-child-exchange";
       let liveChildOrderId = "recovery-child-exchange";
       let makerMode: "off" | "shadow" = fault === "maker-active" ? "shadow" : "off";
+      let ladderFractions = DEFAULT_EXECUTION_POLICY.bounceExit.ladderFractions;
       const exchangeOrder = (orderId: string, clientOrderId: string | null): ExchangeOrder => ({
         orderId,
         clientOrderId,
@@ -12849,6 +12869,7 @@ describe("ExecutionModule", () => {
             ...DEFAULT_EXECUTION_POLICY.makerEntry,
             mode: makerMode,
           },
+          bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, ladderFractions },
         }),
       });
       await recovery.start();
@@ -12874,6 +12895,9 @@ describe("ExecutionModule", () => {
         inventoryLots,
         setMakerMode: (mode: "off" | "shadow") => {
           makerMode = mode;
+        },
+        setLadderFractions: (fractions: number[]) => {
+          ladderFractions = fractions;
         },
       };
     }
@@ -13181,6 +13205,23 @@ describe("ExecutionModule", () => {
         }
       },
     );
+
+    it("authorizes legacy 3-rung successor coverage after the live policy switches to one rung", async () => {
+      const f = await fixture(undefined, 0.3, 22.5, {
+        anchorPrice: 0.044,
+        predecessorPrice: 0.053,
+        tickSize: 0.001,
+      });
+      try {
+        await seedRepricedRecoverySuccessors(f);
+        f.setLadderFractions([1]);
+
+        await expect(f.recovery.authorizeResumeAfterStartupExitRecovery()).resolves.toBe(true);
+      } finally {
+        await f.recovery.stop();
+        f.conn.close();
+      }
+    });
 
     it.each([
       ["missing rung", (orders: Order[]) => orders.slice(0, 2)],

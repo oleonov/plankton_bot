@@ -384,6 +384,13 @@ export type DecisionPlanningInput = {
    */
   placedBounceRungIndices?: readonly number[];
   /**
+   * The shape (`ladderFractions`) this position's ladder was started with, read from its own
+   * orders (docs/plans/2026-10-05-pin-bounce-ladder-shape.md) so a live policy change never
+   * re-plans rungs placed under an earlier shape. Null/undefined means the ladder has no orders
+   * yet and starts on the live `policy.bounceExit.ladderFractions`.
+   */
+  bounceLadderFractions?: readonly number[] | null;
+  /**
    * The position size basis rung fractions are computed against, PINNED to
    * whatever it was when the ladder's first rung was placed (docs/plans/
    * 2026-07-16-bounce-exit-ladder-redesign.md Phase 4 add-invariance fix) —
@@ -1090,8 +1097,11 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
           policy.bounceExit.whitelistConditionIds.includes(market.conditionId)))
     ) {
       // policy is narrowed non-null here → bounceExit is the (always-present)
-      // required BounceExitPolicy, never undefined.
-      const bounceExit = policy.bounceExit;
+      // required BounceExitPolicy, never undefined. An existing ladder keeps
+      // its own shape; only targets/steps follow the live policy.
+      const bounceExit = input.bounceLadderFractions
+        ? { ...policy.bounceExit, ladderFractions: [...input.bounceLadderFractions] }
+        : policy.bounceExit;
       // Anchored to the position's FIRST fill, never the mutable avgEntryPrice
       // (which drifts with every scale-in/partial-sell) — the whole point of a
       // laddered exit is that every rung's price is fixed at first-entry time.
@@ -1231,6 +1241,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
           originalPositionSize,
           remainingPositionSize,
           ...(sellableFlowOn ? { uncommittedRemainder } : {}),
+          ladderFractions: bounceExit.ladderFractions,
         };
         const supplementalSizing =
           sellableFlowOn && input.hasWorkingBounceCleanup
@@ -1316,6 +1327,7 @@ export function evaluateDecisionPlan(input: DecisionPlanningInput): DecisionPlan
               // maker_rung emission's Codex H4 field above.
               uncommittedRemainder,
               isCleanupRung: true,
+              ladderFractions: bounceExit.ladderFractions,
             },
           },
           buyCount,

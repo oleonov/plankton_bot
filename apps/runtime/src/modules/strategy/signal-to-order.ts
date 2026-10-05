@@ -60,6 +60,7 @@ import {
   BOUNCE_EXIT_TARGET_RULE_ID,
   isBounceForceExit,
   isGateWhitelisted,
+  pinnedBounceLadderFractions,
   parseEntryFreshEdgeAttribution,
   resolveSellableShareFloor,
 } from "@krabs/domain";
@@ -1546,7 +1547,7 @@ export class SignalToOrderBridge {
                 bounceRung: signal.bounceRung,
                 originalPositionSize: bounceOriginalPositionSize,
                 availableSize: bounceRolloverCeiling,
-                ladderFractions: policy.bounceExit.ladderFractions,
+                ladderFractions: pinnedBounceLadderFractions(signal.bounceRung),
                 minOrderSize: market.minOrderSize,
               })
             : null;

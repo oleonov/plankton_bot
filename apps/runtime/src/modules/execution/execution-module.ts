@@ -74,6 +74,7 @@ import {
   GATE_ENTRY_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   S1_LADDER_RULE_ID,
+  bounceLadderPolicy,
   isBounceForceExit,
   evaluateExitLossFloor,
   computePolymarketPlatformFeeRate,
@@ -4780,9 +4781,9 @@ export class ExecutionModule implements RuntimeModule {
     predecessor: Order,
     residual: number,
   ): RecoverySuccessorContext | null {
-    const policy = this.currentBounceExitPolicy();
     const market = this.deps.marketRepo.findByTokenId(position.tokenId);
     const lineage = bounceRungMetadata(predecessor);
+    const policy = this.bounceExitPolicyFor(lineage);
     if (
       !policy ||
       !market?.active ||
@@ -6486,7 +6487,7 @@ export class ExecutionModule implements RuntimeModule {
         bounceRung: cmd.metadata?.bounceRung,
         s1: cmd.metadata?.s1,
       },
-      this.currentBounceExitPolicy(),
+      this.bounceExitPolicyFor(cmd.metadata?.bounceRung),
     );
   }
 
@@ -6527,7 +6528,7 @@ export class ExecutionModule implements RuntimeModule {
           },
           position: positions[0] ?? null,
           orders,
-          policy: this.currentBounceExitPolicy(),
+          policy: this.bounceExitPolicyFor(cmd.metadata?.bounceRung),
           minOrderSize: this.resolveCommandExplicitMinOrderSize(cmd),
           filledSize: (order) => filled.get(String(order.orderId)) ?? null,
         })
@@ -6730,6 +6731,12 @@ export class ExecutionModule implements RuntimeModule {
 
   private currentBounceExitPolicy(): ExecutionPolicy["bounceExit"] | undefined {
     return this.deps.executionPolicy?.().bounceExit;
+  }
+
+  /** A started ladder keeps its pinned shape; only a rung-less order sees the live shape. */
+  private bounceExitPolicyFor(rung: unknown): ExecutionPolicy["bounceExit"] | undefined {
+    const policy = this.currentBounceExitPolicy();
+    return policy && rung != null ? bounceLadderPolicy(policy, rung) : policy;
   }
 
   private currentOrderCapacityPolicy(): ExecutionPolicy["orderCapacity"] | undefined {
@@ -7094,7 +7101,8 @@ export class ExecutionModule implements RuntimeModule {
       decisionRuleId: cmd.decisionRuleId ?? null,
       sellPolicy,
       s1MaxOrdersPerToken: this.currentTrackS1Policy()?.s1MaxOrdersPerToken,
-      bounceLadderRungCount: this.currentBounceExitPolicy()?.ladderFractions.length,
+      bounceLadderRungCount: this.bounceExitPolicyFor(cmd.metadata?.bounceRung)?.ladderFractions
+        .length,
       isExitCoverageCleanup,
     });
   }

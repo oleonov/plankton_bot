@@ -206,6 +206,10 @@ export interface BounceRungMetadata {
    * minimum but the exact residual clears it. The bounce micro-cap must not
    * fragment this order below the size it was deliberately sized to clear. */
   isCleanupRung?: boolean;
+  /** `BounceExitPolicy.ladderFractions` the ladder was started with; every later rung of the
+   * ladder is planned, counted and proven against it, not the live policy. Absent on rungs
+   * placed before pinning (they resolve to LEGACY_BOUNCE_LADDER_FRACTIONS). */
+  ladderFractions?: readonly number[];
 }
 
 export type EntryFreshEdgeKind = "first_entry" | "ladder_or_scale_in";

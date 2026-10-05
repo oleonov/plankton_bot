@@ -355,6 +355,53 @@ function makeObservedSupplementalFixture(kind: "mario" | "derek") {
   return { policy, position, orders, signal };
 }
 
+const LEGACY_FRACTIONS = [0.3, 0.4, 0.3];
+
+function makeSingleRungPolicy(): ExecutionPolicy {
+  return makeExecutionPolicy({
+    bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, ladderFractions: [1] },
+  });
+}
+
+/** Rungs placed before pinning carry no `ladderFractions`, i.e. the legacy 30/40/30 shape. */
+function makeLegacyRungOrder(rungIndex: number, status: Order["status"] = "open"): Order {
+  return makeOpenSellOrder({
+    orderId: `legacy-rung-${rungIndex}` as any,
+    clientOrderId: `legacy-rung-cl-${rungIndex}` as any,
+    decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+    signalReason: "repricing-exit",
+    status,
+    metadata: {
+      bounceRung: {
+        ladderId: "legacy-ladder",
+        rungIndex,
+        anchorPrice: 0.1,
+        fraction: LEGACY_FRACTIONS[rungIndex],
+        originalPositionSize: 30,
+        remainingPositionSize: 30,
+        uncommittedRemainder: 30 * LEGACY_FRACTIONS[rungIndex]!,
+      },
+    },
+  });
+}
+
+function makeSingleRungGate(orders: Order[], position: Position | null = null) {
+  const orderRepo = makeOrderRepo(orders);
+  orderRepo.findById = vi.fn((id) => orders.find((order) => order.orderId === id) ?? null);
+  const policy = makeSingleRungPolicy();
+  return new AlgoRiskGateImpl(
+    orderRepo,
+    makePositionRepo(position),
+    makeLogger(),
+    undefined,
+    undefined,
+    undefined,
+    () => policy,
+    undefined,
+    makeMarketRepo(),
+  );
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("AlgoRiskGateImpl", () => {
@@ -937,6 +984,100 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(approved.approved).toBe(true);
     expect(malformed.rejectionReasons).toContain("per_token_sell_limit");
+  });
+
+  describe("pinned ladder shape under a single-rung live policy", () => {
+    const bounceSell = (overrides: Partial<Signal>) =>
+      makeSignal({
+        side: "sell",
+        reason: "repricing-exit",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        ...overrides,
+      });
+
+    it("admits a legacy ladder cleanup beside its three legacy rungs (cap max(2,3)+1)", async () => {
+      const position = makeOpenPosition({ size: 120, exitOwner: "bounce" });
+      const { bounceExit } = makeSingleRungPolicy();
+      const anchorPrice = 0.1;
+      const price = computeHarvestTarget(
+        anchorPrice,
+        (1 + bounceExitTierGain(bounceExit, anchorPrice)) *
+          Math.pow(1 + bounceExit.ladderStepPct, 2) -
+          1,
+        0.01,
+      );
+      const gate = makeSingleRungGate(
+        [0, 1, 2].map((i) => makeLegacyRungOrder(i)),
+        position,
+      );
+
+      const decision = await gate.evaluate(
+        bounceSell({
+          positionId: position.positionId,
+          suggestedPrice: price,
+          suggestedSize: 90,
+          suggestedSizeUsdc: price * 90,
+          bounceRung: {
+            ladderId: "legacy-ladder",
+            rungIndex: 2,
+            anchorPrice,
+            fraction: 3,
+            originalPositionSize: 30,
+            remainingPositionSize: 120,
+            uncommittedRemainder: 90,
+            isCleanupRung: true,
+            ladderFractions: LEGACY_FRACTIONS,
+          },
+        }),
+      );
+
+      expect(decision.rejectionReasons).toEqual([]);
+      expect(decision.approved).toBe(true);
+    });
+
+    it("keeps a single-rung ladder on the single-rung cap (control)", async () => {
+      const gate = makeSingleRungGate([makeLegacyRungOrder(0), makeLegacyRungOrder(1)]);
+
+      const decision = await gate.evaluate(
+        bounceSell({
+          bounceRung: {
+            ladderId: "single-rung-ladder",
+            rungIndex: 0,
+            anchorPrice: 0.1,
+            fraction: 1,
+            originalPositionSize: 30,
+            remainingPositionSize: 30,
+            ladderFractions: [1],
+          },
+        }),
+      );
+
+      expect(decision.rejectionReasons).toContain("per_token_sell_limit");
+    });
+
+    it("counts an ASK-capture replacement against its predecessor's legacy ladder", async () => {
+      const predecessor = makeLegacyRungOrder(0, "cancelled");
+      const gate = makeSingleRungGate([
+        predecessor,
+        makeLegacyRungOrder(1),
+        makeLegacyRungOrder(2),
+      ]);
+
+      const decision = await gate.evaluate(
+        bounceSell({
+          bounceAskCaptureReprice: {
+            version: 1,
+            intentId: "bacri_legacy",
+            rootOrderId: predecessor.orderId,
+            predecessorOrderId: predecessor.orderId,
+            replacementIndex: 1,
+          },
+        }),
+      );
+
+      expect(decision.rejectionReasons).toEqual([]);
+      expect(decision.approved).toBe(true);
+    });
   });
 
   it("admits only the exact missing ordinary rung beside a working cleanup", async () => {

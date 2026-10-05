@@ -8,6 +8,7 @@ import {
 } from "../algo-decision-module.js";
 import { RuntimeMetricWriter } from "../../../runtime-metric-writer.js";
 import type { SelectedMarketCache } from "../algo-decision-module.js";
+import { evaluateDecisionPlan } from "../decision-planner.js";
 import type {
   DecisionPlanResult,
   DecisionPlanSideEffect,
@@ -10450,6 +10451,98 @@ describe("AlgoDecisionModule", () => {
       expect(decisionInput!.placedBounceRungIndices).toEqual([]);
 
       await mod.stop();
+    });
+    // docs/plans/2026-10-05-pin-bounce-ladder-shape.md: under a live [1] policy each ladder is
+    // planned on the shape its own orders carry; only a ladder without orders takes the live one.
+    describe("pinned ladder shape (live policy [1])", () => {
+      const SINGLE_RUNG_POLICY = {
+        ...DEFAULT_EXECUTION_POLICY,
+        sellableFlow: { enabled: true, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: 1 },
+        bounceExit: { ...DEFAULT_EXECUTION_POLICY.bounceExit, ladderFractions: [1] },
+      };
+
+      async function plannedBounceRung(
+        tokenId: string,
+        rungs: readonly { rungIndex: number; size: number; status: Order["status"] }[],
+        stampedShape?: readonly number[],
+      ) {
+        const legState = makeSellReadyLegState(tokenId, {
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        });
+        legStateRepo = createMockLegStateRepo([legState]);
+        const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+        const orders = rungs.map(({ rungIndex, size, status }) =>
+          makeOrder(tokenId, {
+            orderId: createOrderId(`${tokenId}-rung-${rungIndex}`),
+            status,
+            size,
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            metadata: {
+              bounceRung: {
+                ladderId,
+                rungIndex,
+                originalPositionSize: 100,
+                ...(stampedShape ? { ladderFractions: stampedShape } : {}),
+              },
+            },
+          }),
+        );
+        const mod = buildModule({
+          positionRepo: {
+            findByTokenId: vi
+              .fn()
+              .mockReturnValue(makeOpenPosition(tokenId, { exitOwner: "bounce", size: 100 })),
+          } as unknown as import("@krabs/domain").PositionRepository,
+          orderRepo: {
+            findRecentByTokenId: vi.fn().mockReturnValue([]),
+            findByTokenId: vi.fn().mockReturnValue(orders),
+          } as unknown as OrderRepository,
+          fillRepo: {
+            findByOrderIds: vi.fn().mockReturnValue([]),
+            findByOrderId: vi.fn().mockReturnValue([]),
+          },
+        });
+        await mod.start();
+        (mod as any).marketCache.set(tokenId, makeMarket(tokenId, null, 0.1));
+        const decisionInput = await (mod as any).createDecisionPlanningInput(
+          createTokenId(tokenId),
+          Date.now(),
+          SINGLE_RUNG_POLICY,
+          null,
+          null,
+        );
+        await mod.stop();
+        const plan = evaluateDecisionPlan(decisionInput);
+        return plan.type === "signal" ? plan.signal.bounceRung : null;
+      }
+
+      it("plans an unstamped ladder on the legacy 30/40/30 shape", async () => {
+        const rung = await plannedBounceRung("token-pin-legacy", [
+          { rungIndex: 0, size: 30, status: "cancelled" },
+          { rungIndex: 1, size: 40, status: "open" },
+          { rungIndex: 2, size: 30, status: "open" },
+        ]);
+        expect(rung).toMatchObject({
+          rungIndex: 0,
+          fraction: 0.3,
+          ladderFractions: [0.3, 0.4, 0.3],
+        });
+      });
+
+      it("plans a stamped ladder on its stamped shape", async () => {
+        const rung = await plannedBounceRung(
+          "token-pin-stamped",
+          [{ rungIndex: 0, size: 30, status: "open" }],
+          [0.5, 0.5],
+        );
+        expect(rung).toMatchObject({ rungIndex: 1, fraction: 0.5, ladderFractions: [0.5, 0.5] });
+      });
+
+      it("plans a ladder without orders on the live shape", async () => {
+        const rung = await plannedBounceRung("token-pin-fresh", []);
+        expect(rung).toMatchObject({ rungIndex: 0, fraction: 1, ladderFractions: [1] });
+      });
     });
   });
 

@@ -7,6 +7,9 @@ import {
   evaluateBounceExit,
   bounceExitTierGain,
   isBounceForceExit,
+  bounceLadderPolicy,
+  pinnedBounceLadderFractions,
+  LEGACY_BOUNCE_LADDER_FRACTIONS,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
   type GateEntryMarketInput,
@@ -290,5 +293,33 @@ describe("isGateWhitelisted", () => {
   it("is false for a null or undefined policy", () => {
     expect(isGateWhitelisted(null, COND)).toBe(false);
     expect(isGateWhitelisted(undefined, COND)).toBe(false);
+  });
+});
+
+describe("pinned bounce ladder shape", () => {
+  it("returns the shape stamped on the rung", () => {
+    expect(pinnedBounceLadderFractions({ ladderFractions: [1] })).toEqual([1]);
+  });
+
+  it.each([
+    ["absent", {}],
+    ["no rung", undefined],
+    ["empty", { ladderFractions: [] }],
+    ["not an array", { ladderFractions: "1" }],
+    ["NaN entry", { ladderFractions: [0.5, Number.NaN] }],
+    ["zero entry", { ladderFractions: [0, 1] }],
+    ["negative entry", { ladderFractions: [-0.3, 1.3] }],
+  ])("falls back to the legacy 30/40/30 shape when the stamp is %s", (_name, rung) => {
+    expect(pinnedBounceLadderFractions(rung)).toEqual([0.3, 0.4, 0.3]);
+    expect(LEGACY_BOUNCE_LADDER_FRACTIONS).toEqual([0.3, 0.4, 0.3]);
+  });
+
+  it("replaces only the ladder fractions of the live policy", () => {
+    const live = { ...DEFAULT_BOUNCE_EXIT, ladderFractions: [1], ladderStepPct: 0.07 };
+    expect(bounceLadderPolicy(live, {})).toEqual({ ...live, ladderFractions: [0.3, 0.4, 0.3] });
+    expect(bounceLadderPolicy(live, { ladderFractions: [0.5, 0.5] })).toEqual({
+      ...live,
+      ladderFractions: [0.5, 0.5],
+    });
   });
 });

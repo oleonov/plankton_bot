@@ -11,9 +11,11 @@ import {
   type MarketRepository,
   type Order,
   BOUNCE_EXIT_TARGET_RULE_ID,
+  bounceLadderPolicy,
   isBounceForceExit,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
+import { parseBounceAskCaptureSignal } from "../../bounce-ask-capture.js";
 import {
   classifyExitCoverageCleanup,
   loadExitCoverageFillTotals,
@@ -276,6 +278,7 @@ export class AlgoRiskGateImpl implements RiskGate {
       isBounceBackstopSignal,
     );
     const policy = this.executionPolicy?.();
+    const ladderBounceExit = this.ladderBounceExitPolicy(signal, policy);
     const market = this.marketRepo?.findByTokenId(signal.tokenId);
     const isBounceCleanupSignal =
       classifyExitCoverageCleanup(
@@ -289,9 +292,13 @@ export class AlgoRiskGateImpl implements RiskGate {
           tickSize: market?.tickSize ?? Number.NaN,
           bounceRung: signal.bounceRung,
         },
-        policy?.bounceExit,
+        ladderBounceExit,
       ) === "bounce";
-    const isBounceSupplementalSignal = this.matchesBounceSupplemental(signal, policy, market);
+    const isBounceSupplementalSignal = this.matchesBounceSupplemental(
+      signal,
+      ladderBounceExit,
+      market,
+    );
     const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
     const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
     const orderPolicy = normalizeOrderCapacityPolicy(policy?.orderCapacity);
@@ -363,7 +370,7 @@ export class AlgoRiskGateImpl implements RiskGate {
         maxOpenOrdersPerToken: resolveEffectiveMaxOpenSellOrdersPerToken({
           decisionRuleId: signal.decisionRuleId ?? null,
           sellPolicy,
-          bounceLadderRungCount: policy?.bounceExit.ladderFractions.length,
+          bounceLadderRungCount: ladderBounceExit?.ladderFractions.length,
           isExitCoverageCleanup: isBounceCleanupSignal || isBounceSupplementalSignal,
         }),
         openOrdersForToken: sellCounts.perTokenOpenSellOrderCount,
@@ -517,9 +524,28 @@ export class AlgoRiskGateImpl implements RiskGate {
     return finish(true);
   }
 
-  private matchesBounceSupplemental(
+  /** Rungs of a started ladder are judged by its pinned shape, not the live one. */
+  private ladderBounceExitPolicy(
     signal: Signal,
     policy: ExecutionPolicy | undefined,
+  ): ExecutionPolicy["bounceExit"] | undefined {
+    const rung = this.bounceRungUnderEvaluation(signal);
+    return policy && rung != null
+      ? bounceLadderPolicy(policy.bounceExit, rung)
+      : policy?.bounceExit;
+  }
+
+  // An ASK-capture replacement carries no rung of its own; the bridge restores its predecessor's.
+  private bounceRungUnderEvaluation(signal: Signal): unknown {
+    if (signal.bounceRung) return signal.bounceRung;
+    const reprice = parseBounceAskCaptureSignal(signal.bounceAskCaptureReprice);
+    if (!reprice) return undefined;
+    return this.orderRepo.findById(reprice.predecessorOrderId)?.metadata?.bounceRung;
+  }
+
+  private matchesBounceSupplemental(
+    signal: Signal,
+    bounceExit: ExecutionPolicy["bounceExit"] | undefined,
     market: ReturnType<MarketRepository["findByTokenId"]> | undefined,
   ): boolean {
     const rung = signal.bounceRung;
@@ -554,7 +580,7 @@ export class AlgoRiskGateImpl implements RiskGate {
           },
           position: positions[0] ?? null,
           orders,
-          policy: policy?.bounceExit,
+          policy: bounceExit,
           minOrderSize: this.resolveMinOrderSize?.(signal.tokenId) ?? null,
           filledSize: (order) => filled.get(String(order.orderId)) ?? null,
         })

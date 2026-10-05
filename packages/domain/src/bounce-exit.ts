@@ -132,6 +132,27 @@ export function bounceExitTierGain(policy: BounceExitPolicy, entryPrice: number)
 }
 
 /**
+ * Shape of every bounce ladder started before rungs carried `ladderFractions`: the only
+ * live-lite shape until 2026-10-05 (docs/plans/2026-10-05-pin-bounce-ladder-shape.md).
+ */
+export const LEGACY_BOUNCE_LADDER_FRACTIONS: readonly number[] = Object.freeze([0.3, 0.4, 0.3]);
+
+/** The ladder shape a placed rung was planned under; un-stamped rungs predate pinning. */
+export function pinnedBounceLadderFractions(rung: unknown): readonly number[] {
+  const fractions = (rung as { ladderFractions?: unknown } | null | undefined)?.ladderFractions;
+  const valid =
+    Array.isArray(fractions) &&
+    fractions.length > 0 &&
+    fractions.every((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
+  return valid ? (fractions as number[]) : LEGACY_BOUNCE_LADDER_FRACTIONS;
+}
+
+/** The live bounce policy as it applies to the ladder of `rung`. */
+export function bounceLadderPolicy(policy: BounceExitPolicy, rung: unknown): BounceExitPolicy {
+  return { ...policy, ladderFractions: [...pinnedBounceLadderFractions(rung)] };
+}
+
+/**
  * GATE-lane bounce-exit decision: the laddered resting-maker exit
  * (docs/plans/2026-07-16-bounce-exit-ladder-redesign.md). Selects the lowest
  * un-placed rung index and returns its price + size fraction; `{intent:"none"}`

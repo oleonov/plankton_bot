@@ -69,6 +69,7 @@ import {
   S1_LADDER_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  pinnedBounceLadderFractions,
   createEntryFreshEdgeAttribution,
   isGateWhitelisted,
   isMakerCaptureNextR23OrderAuthorized,
@@ -2532,6 +2533,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       latestSellOrder: legState ? this.getLatestSellOrderForSizing(tokenId) : null,
       hasActiveSellOrderForQd: legState ? this.hasActiveSellOrderForQd(tokenId) : false,
       placedBounceRungIndices: bounceLadderState?.placedRungIndices ?? [],
+      bounceLadderFractions: bounceLadderState?.ladderFractions ?? null,
       originalLadderPositionSize: bounceLadderState?.originalPositionSize ?? null,
       bounceLadderSoldShares: bounceLadderState?.soldShares ?? 0,
       bounceLadderOpenCommitment: bounceLadderState?.openCommitment ?? 0,
@@ -2989,6 +2991,9 @@ export class AlgoDecisionModule implements RuntimeModule {
   // Cancelled/rejected rungs are NOT placed — they get retried.
   // Scoped to `ladderId` so a closed-then-reopened GATE position on the same
   // token starts a fresh ladder rather than inheriting a stale rung set.
+  // `ladderFractions` is the shape the ladder started with (docs/plans/
+  // 2026-10-05-pin-bounce-ladder-shape.md), so a live policy change cannot
+  // re-plan rungs that are already resting; null means no order yet.
   private resolveBounceLadderState(
     tokenId: TokenId,
     ladderId: string,
@@ -3000,10 +3005,12 @@ export class AlgoDecisionModule implements RuntimeModule {
     openCommitment: number;
     hasOpenBounceRung: boolean;
     hasWorkingCleanup: boolean;
+    ladderFractions: readonly number[] | null;
   } {
     const repo = this.deps.orderRepo;
     const emptyState = {
       placedRungIndices: [],
+      ladderFractions: null,
       originalPositionSize: null,
       soldShares: 0,
       openCommitment: 0,
@@ -3093,6 +3100,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       openCommitment,
       hasOpenBounceRung,
       hasWorkingCleanup: workingCleanupCount === 1,
+      ladderFractions: ladderOrders[0]
+        ? pinnedBounceLadderFractions(ladderOrders[0].metadata?.bounceRung)
+        : null,
     };
   }
 

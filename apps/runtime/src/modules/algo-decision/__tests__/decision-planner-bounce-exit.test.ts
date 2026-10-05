@@ -303,6 +303,7 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
       fraction: 0.3,
       originalPositionSize: 100,
       remainingPositionSize: 100,
+      ladderFractions: [0.3, 0.4, 0.3],
     });
   });
 
@@ -349,6 +350,7 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
       fraction: 0.4,
       originalPositionSize: 100,
       remainingPositionSize: 70,
+      ladderFractions: [0.3, 0.4, 0.3],
     });
   });
 
@@ -386,6 +388,7 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
       fraction: 0.4,
       originalPositionSize: 100,
       remainingPositionSize: 150,
+      ladderFractions: [0.3, 0.4, 0.3],
     });
   });
 
@@ -671,8 +674,8 @@ describe("bounce-exit SELL branch (decision-planner) — GATE lane", () => {
         fraction: 0.4,
         originalPositionSize: 100,
         remainingPositionSize: 100,
-        // uncommittedRemainder is absent (Codex H4 fix — byte-identical
-        // metadata shape) when the flag is off.
+        ladderFractions: [0.3, 0.4, 0.3],
+        // uncommittedRemainder is absent when the flag is off (Codex H4 fix).
       });
     });
 
@@ -814,20 +817,67 @@ describe("single-rung ladder [1] (operator 2026-10-05)", () => {
     expect(result.signal.suggestedSize).toBeCloseTo(84, 10);
     expect(result.signal.bounceRung).toMatchObject({ rungIndex: 0, isCleanupRung: true });
   });
+});
 
-  it("moves a legacy three-rung remainder to rung0's price once the old rungs are gone", () => {
+// docs/plans/2026-10-05-pin-bounce-ladder-shape.md: a ladder keeps the shape it started with, so
+// switching the live policy to [1] must not re-plan resting 30/40/30 ladders as one-rung ladders.
+describe("pinned ladder shape under a live [1] policy", () => {
+  const LEGACY = [0.3, 0.4, 0.3];
+  const singleRungPolicy = () =>
+    sellableFlowOnPolicy({ bounceExit: { ...ENABLED_BOUNCE_EXIT, ladderFractions: [1] } });
+
+  it("re-places a legacy ladder's missing rung0 with the legacy fraction and shape", () => {
     const result = evaluateDecisionPlan(
       input({
-        placedBounceRungIndices: [0, 1, 2],
-        bounceLadderSoldShares: 30,
+        placedBounceRungIndices: [1, 2],
+        bounceLadderOpenCommitment: 70,
+        bounceLadderFractions: LEGACY,
         executionPolicy: singleRungPolicy(),
       }),
     );
     expect(result.type).toBe("signal");
     if (result.type !== "signal") return;
     expect(result.signal.suggestedPrice).toBeCloseTo(0.12, 10);
-    expect(result.signal.suggestedSize).toBeCloseTo(70, 10);
-    expect(result.signal.bounceRung).toMatchObject({ rungIndex: 0, isCleanupRung: true });
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 0,
+      fraction: 0.3,
+      ladderFractions: LEGACY,
+    });
+  });
+
+  it("starts a ladder with no orders on the live [1] shape", () => {
+    const result = evaluateDecisionPlan(
+      input({ bounceLadderFractions: null, executionPolicy: singleRungPolicy() }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedSize).toBeCloseTo(100, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 0,
+      fraction: 1,
+      ladderFractions: [1],
+    });
+  });
+
+  it("sends a complete legacy ladder's residual to the legacy last rung as cleanup", () => {
+    const result = evaluateDecisionPlan(
+      input({
+        placedBounceRungIndices: [0, 1, 2],
+        bounceLadderSoldShares: 70,
+        bounceLadderFractions: LEGACY,
+        executionPolicy: singleRungPolicy(),
+      }),
+    );
+    expect(result.type).toBe("signal");
+    if (result.type !== "signal") return;
+    expect(result.signal.suggestedPrice).toBeCloseTo(0.18, 10);
+    expect(result.signal.suggestedSize).toBeCloseTo(30, 10);
+    expect(result.signal.bounceRung).toMatchObject({
+      rungIndex: 2,
+      isCleanupRung: true,
+      ladderFractions: LEGACY,
+    });
   });
 });
 
