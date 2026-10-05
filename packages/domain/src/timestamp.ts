@@ -98,3 +98,8 @@ export function toCanonicalIso(raw: unknown): string | null {
   const ms = parseInstantMs(raw.trim());
   return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
+
+/** Start of the UTC second containing `ms` — the resolution exchange fill timestamps carry. */
+export function floorToSecondMs(ms: number): number {
+  return Math.floor(ms / 1000) * 1000;
+}

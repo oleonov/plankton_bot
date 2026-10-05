@@ -293,16 +293,55 @@ describe("SignalFeedWarmTier", () => {
     ]);
   });
 
-  it("caps warm buckets per token by dropping oldest buckets", () => {
+  it("caps warm buckets per token by dropping oldest persisted buckets", () => {
     const tier = new SignalFeedWarmTier(60_000, 2);
 
-    tier.ingestSamples(TOKEN, [sample(1_000, 0.1), sample(61_000, 0.2), sample(121_000, 0.3)]);
+    tier.ingestSamples(TOKEN, [sample(1_000, 0.1), sample(61_000, 0.2)]);
+    tier.markPersisted(TOKEN, 0);
+    tier.markPersisted(TOKEN, 60_000);
+    tier.ingestSamples(TOKEN, [sample(121_000, 0.3)]);
 
     expect(tier.getBuckets(TOKEN).map((bucket) => bucket.bucketStartMs)).toEqual([60_000, 120_000]);
   });
 
+  it("never drops an unpersisted bucket, even past the cap, until it is persisted", () => {
+    const tier = new SignalFeedWarmTier(60_000, 3);
+
+    tier.ingestSamples(TOKEN, [
+      sample(1_000, 0.1),
+      sample(61_000, 0.2),
+      sample(121_000, 0.3),
+      sample(181_000, 0.4),
+      sample(241_000, 0.5),
+    ]);
+
+    expect(tier.getBuckets(TOKEN).map((bucket) => bucket.bucketStartMs)).toEqual([
+      0, 60_000, 120_000, 180_000, 240_000,
+    ]);
+
+    for (const bucketStartMs of [0, 60_000, 120_000, 180_000, 240_000]) {
+      tier.markPersisted(TOKEN, bucketStartMs);
+    }
+    tier.ingestSamples(TOKEN, [sample(301_000, 0.6)]);
+
+    expect(tier.getBuckets(TOKEN).map((bucket) => bucket.bucketStartMs)).toEqual([
+      180_000, 240_000, 300_000,
+    ]);
+  });
+
   it("computes bucket starts by granularity", () => {
     expect(bucketStart(119_999, 60_000)).toBe(60_000);
+  });
+
+  it("deletes a token's buckets on dropToken", () => {
+    const tier = new SignalFeedWarmTier(60_000);
+
+    tier.ingestSamples(TOKEN, [sample(1_000, 0.1)]);
+    expect(tier.getBuckets(TOKEN)).not.toEqual([]);
+
+    tier.dropToken(TOKEN);
+
+    expect(tier.getBuckets(TOKEN)).toEqual([]);
   });
 });
 
@@ -658,6 +697,73 @@ describe("SignalFeedManager", () => {
     expect(metrics.counters).not.toContainEqual(
       expect.objectContaining({ name: SIGNAL_FEED_METRICS.staleTokensEvicted }),
     );
+  });
+
+  it("keeps the warm tier bounded across 30h of per-minute samples via timer-driven flushes", async () => {
+    const bus = new InProcessEventBus();
+    const manager = new SignalFeedManager({
+      bus,
+      repository: new RecordingSignalFeedRepository(),
+      config: {
+        enabled: true,
+        windowShortMs: 5 * 60_000,
+        warmBucketMs: 60_000,
+        windowLongMs: 3 * 60 * 60_000,
+      },
+    });
+
+    await manager.start();
+    const totalMinutes = 30 * 60;
+    for (let minute = 0; minute <= totalMinutes; minute += 1) {
+      const tsMs = minute * 60_000;
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [market(TOKEN, 0.1)],
+        timestamp: tsMs,
+      });
+      manager.flushHotToWarm(tsMs);
+      manager.flushWarmToCold(tsMs);
+    }
+
+    // windowLongMs 3h / warmBucketMs 60s + 1 = 181. The old hardcoded 24h cap (1440)
+    // would still be well over this bound after 30h of per-minute ingestion.
+    expect(manager.getWarmTier().getBuckets(TOKEN).length).toBeLessThanOrEqual(181);
+  });
+
+  it("persists a stale token's unpersisted warm buckets and clears them on eviction, keeping active tokens", async () => {
+    const bus = new InProcessEventBus();
+    const repo = new RecordingSignalFeedRepository();
+    const activeToken = createTokenId("active-token");
+    const manager = new SignalFeedManager({
+      bus,
+      repository: repo,
+      config: { enabled: true, windowShortMs: 10 * 60_000, warmBucketMs: 60_000 },
+    });
+
+    await manager.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(TOKEN, 0.2), market(activeToken, 0.3)],
+      timestamp: 1_000,
+    });
+    manager.flushHotToWarm(1_000);
+    // Keep activeToken fresh right up to the eviction check, unlike TOKEN.
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [market(activeToken, 0.4)],
+      timestamp: 60 * 60_000,
+    });
+    manager.flushHotToWarm(60 * 60_000);
+
+    expect(manager.getWarmTier().getBuckets(TOKEN).length).toBeGreaterThan(0);
+    expect(repo.upserts).toEqual([]);
+
+    manager.maintenancePrune(60 * 60_000 + 1_000 + 1);
+
+    expect(manager.getWarmTier().getBuckets(TOKEN)).toEqual([]);
+    expect(repo.upserts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tokenId: TOKEN, bucketStartMs: 0, persisted: false }),
+      ]),
+    );
+    expect(manager.getWarmTier().getBuckets(activeToken).length).toBeGreaterThan(0);
   });
 
   it("does not report fresh tokens as stale", async () => {

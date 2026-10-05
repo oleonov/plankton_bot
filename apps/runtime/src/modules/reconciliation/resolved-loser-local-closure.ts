@@ -1,4 +1,4 @@
-import { parseInstantMs, RESOLVED_LOSER_LOCAL_CANCEL_REASON } from "@krabs/domain";
+import { floorToSecondMs, parseInstantMs, RESOLVED_LOSER_LOCAL_CANCEL_REASON } from "@krabs/domain";
 import type {
   ExchangeFill,
   MarketResolution,
@@ -208,7 +208,7 @@ function settledAccountingMatches(
     normalize(settlement.resolution) !== normalize(resolution.resolution) ||
     !Number.isFinite(inserted) ||
     // SQLite's default records the insertion bucket, not its millisecond instant.
-    inserted < (secondPrecision ? Math.floor(settled / 1000) * 1000 : settled) ||
+    inserted < (secondPrecision ? floorToSecondMs(settled) : settled) ||
     settled !== parseInstantMs(resolution.resolvedAt) ||
     !Number.isFinite(settled) ||
     parseInstantMs(position.closedAt!) < settled
@@ -252,7 +252,7 @@ function accounted(
     fill.reconciled === 1 &&
     Number.isFinite(at) &&
     at <= settled &&
-    (fill.orderId !== order.orderId || at >= parseInstantMs(order.createdAt)) &&
+    (fill.orderId !== order.orderId || at >= floorToSecondMs(parseInstantMs(order.createdAt))) &&
     fill.accounting.length === 1 &&
     fill.accounting.every(
       (a) =>
@@ -292,7 +292,7 @@ export async function closeResolvedLosers(
   });
   if (!eligible.length || !deps.gateway.getFillsResult || !deps.gateway.getOrderResult) return;
   const since =
-    Math.min(...eligible.map((o) => Math.floor(parseInstantMs(o.createdAt) / 1000) * 1000)) - 1000;
+    Math.min(...eligible.map((o) => floorToSecondMs(parseInstantMs(o.createdAt)))) - 1000;
   const history = await deps.gateway.getFillsResult(since);
   if (!history.ok) return;
   await importExchangeFills(history.data, {

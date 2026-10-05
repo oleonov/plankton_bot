@@ -84,7 +84,12 @@ export class SignalFeedManager implements RuntimeModule {
 
   constructor(private readonly deps: SignalFeedManagerDeps) {
     this.hot = new SignalFeedHotBuffer(deps.config.windowShortMs);
-    this.warm = new SignalFeedWarmTier(deps.config.warmBucketMs);
+    const windowLongMs = deps.config.windowLongMs;
+    const warmBucketCap =
+      windowLongMs == null
+        ? DEFAULT_WARM_BUCKET_CAP
+        : Math.ceil(windowLongMs / deps.config.warmBucketMs) + 1;
+    this.warm = new SignalFeedWarmTier(deps.config.warmBucketMs, warmBucketCap);
   }
 
   async start(): Promise<void> {
@@ -189,14 +194,7 @@ export class SignalFeedManager implements RuntimeModule {
 
   flushWarmToCold(nowMs: number): void {
     if (!this.deps.config.enabled) return;
-    for (const tokenKey of this.tokenIds) {
-      const tokenId = tokenKey as TokenId;
-      const unpersisted = this.warm.takeUnpersisted(tokenId);
-      if (unpersisted.length === 0) continue;
-      this.deps.repository.upsertBuckets(unpersisted, nowMs);
-      this.recordCounter(SIGNAL_FEED_METRICS.bucketsFlushedCold, unpersisted.length);
-      for (const bucket of unpersisted) this.warm.markPersisted(tokenId, bucket.bucketStartMs);
-    }
+    for (const tokenKey of this.tokenIds) this.persistUnpersisted(tokenKey, nowMs);
   }
 
   maintenancePrune(nowMs: number): void {
@@ -255,7 +253,7 @@ export class SignalFeedManager implements RuntimeModule {
       if (sampleTokenIds.length < STALE_TOKEN_SAMPLE_CAP) sampleTokenIds.push(tokenKey);
       if (lastSampleAgeMs >= STALE_TOKEN_EVICTION_MS) evictKeys.push(tokenKey);
     }
-    for (const tokenKey of evictKeys) this.dropToken(tokenKey);
+    for (const tokenKey of evictKeys) this.dropToken(tokenKey, nowMs);
     if (staleAges.length === 0) return;
     staleAges.sort((left, right) => left - right);
     const evictedTokenCount = evictKeys.length;
@@ -274,10 +272,21 @@ export class SignalFeedManager implements RuntimeModule {
     });
   }
 
-  private dropToken(tokenKey: string): void {
+  private dropToken(tokenKey: string, nowMs: number): void {
+    this.persistUnpersisted(tokenKey, nowMs);
     this.hot.dropToken(tokenKey as TokenId);
     this.tokenIds.delete(tokenKey);
     this.lastHotFlushTsByToken.delete(tokenKey);
+    this.warm.dropToken(tokenKey as TokenId);
+  }
+
+  private persistUnpersisted(tokenKey: string, nowMs: number): void {
+    const tokenId = tokenKey as TokenId;
+    const unpersisted = this.warm.takeUnpersisted(tokenId);
+    if (unpersisted.length === 0) return;
+    this.deps.repository.upsertBuckets(unpersisted, nowMs);
+    this.recordCounter(SIGNAL_FEED_METRICS.bucketsFlushedCold, unpersisted.length);
+    for (const bucket of unpersisted) this.warm.markPersisted(tokenId, bucket.bucketStartMs);
   }
 
   private recordCounter(name: string, value = 1): void {
@@ -417,6 +426,10 @@ export class SignalFeedWarmTier {
       .map(cloneBucket);
   }
 
+  dropToken(tokenId: TokenId): void {
+    this.bucketsByToken.delete(String(tokenId));
+  }
+
   private getOrCreateBucket(tokenId: TokenId, bucketStartMs: number): OhlcBucket {
     const buckets = this.mutableBuckets(tokenId);
     const existing = buckets.find((bucket) => bucket.bucketStartMs === bucketStartMs);
@@ -448,10 +461,14 @@ export class SignalFeedWarmTier {
     return created;
   }
 
+  // The cap applies to persisted buckets only: trimming an unpersisted one would lose data
+  // that never reached cold storage, whatever order the flush timers happen to fire in.
   private trim(tokenId: TokenId): void {
     const buckets = this.mutableBuckets(tokenId);
     const overflow = buckets.length - this.maxBucketsPerToken;
-    if (overflow > 0) buckets.splice(0, overflow);
+    let removable = 0;
+    while (removable < overflow && buckets[removable]!.persisted) removable += 1;
+    if (removable > 0) buckets.splice(0, removable);
   }
 }
 

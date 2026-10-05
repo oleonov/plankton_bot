@@ -198,4 +198,4 @@ export {
 } from "./bounce-exit.js";
 export type { GateEntryMarketInput, BounceExitContext, BounceExitDecision } from "./bounce-exit.js";
 export * from "./exit-loss-floor.js";
-export { parseInstantMs, toCanonicalIso } from "./timestamp.js";
+export { floorToSecondMs, parseInstantMs, toCanonicalIso } from "./timestamp.js";

@@ -85,21 +85,54 @@ describe("resolved loser administrative closure with real ledger repositories", 
       markToMarketEnabled: false,
       emitStrandedFillAlert: discardStrandedFillAlert,
     });
-  function partialSell() {
+  function partialSell(filledAt = "2026-08-01T00:01:00.000Z") {
     conn.db
       .prepare(
         `INSERT INTO fills (fill_id,order_id,token_id,condition_id,side,price,size,size_usdc,reconciled,filled_at)
-      VALUES ('partial','sell','loser','condition','sell',0.2,2,0.4,1,'2026-08-01T00:01:00.000Z')`,
+      VALUES ('partial','sell','loser','condition','sell',0.2,2,0.4,1,?)`,
       )
-      .run();
+      .run(filledAt);
     conn.db
       .prepare(
         `INSERT INTO pnl_ledger (fill_id,position_id,delta,filled_at,created_at)
-      VALUES ('partial','position',0.2,'2026-08-01T00:01:00.000Z','2026-08-01 00:01:01')`,
+      VALUES ('partial','position',0.2,?,'2026-08-01 00:01:01')`,
       )
-      .run();
+      .run(filledAt);
     deps.orderRepo.updateStatus(order().orderId, "partially-filled");
   }
+  // The BUY opened the SELL's position and shares its sub-second created_at (`…:10.500Z`).
+  function buyFill(filledAt: string) {
+    deps.orderRepo.save({
+      ...order(),
+      orderId: createOrderId("buy"),
+      clientOrderId: "buy-client" as any,
+      exchangeOrderId: "buy-exchange",
+      side: "buy",
+      status: "filled",
+    });
+    conn.db
+      .prepare(
+        `INSERT INTO fills (fill_id,order_id,token_id,condition_id,side,price,size,size_usdc,reconciled,filled_at)
+      VALUES ('buy-fill','buy','loser','condition','buy',0.1,10,1,1,?)`,
+      )
+      .run(filledAt);
+  }
+  const buyLot = () =>
+    conn.db
+      .exec(`INSERT INTO inventory_lots (lot_id,position_id,token_id,side,size,remaining_size,entry_price,cost_usdc,fill_id,created_at)
+      VALUES ('lot','position','loser','buy',10,0,0.1,1,'buy-fill','2026-08-01 00:00:12')`);
+  // Exchange fill timestamps are whole seconds: same second as the sub-second `created`.
+  const sameSecond = "2026-08-01T00:00:10.000Z",
+    secondEarlier = "2026-08-01T00:00:09.000Z";
+  const fixtures = {
+    plain: () => {},
+    partial: () => partialSell(),
+    "same-second BUY": () => {
+      buyFill(sameSecond);
+      buyLot();
+    },
+    "same-second own SELL fill": () => partialSell(sameSecond),
+  };
   const lateFill = (): ExchangeFill => ({
     fillId: "late",
     orderId: "exchange",
@@ -167,10 +200,11 @@ describe("resolved loser administrative closure with real ledger repositories", 
   });
   afterEach(() => conn.close());
 
-  it.each([false, true])(
-    "passes the real startup ownership gate after one default module pass (partial=%s)",
-    async (partial) => {
-      if (partial) partialSell();
+  it.each(Object.keys(fixtures) as (keyof typeof fixtures)[])(
+    "passes the real startup ownership gate after one default module pass (%s)",
+    async (fixture) => {
+      fixtures[fixture]();
+      const partial = fixture === "partial" || fixture === "same-second own SELL fill";
       const control = bootstrapControlDb(":memory:");
       const store = new ExchangeStateStore();
       const module = () =>
@@ -745,27 +779,39 @@ describe("resolved loser administrative closure with real ledger repositories", 
   });
 
   it("requires BUY lot attribution before allowing the same settled cycle", async () => {
-    deps.orderRepo.save({
-      ...order(),
-      orderId: createOrderId("buy"),
-      clientOrderId: "buy-client" as any,
-      exchangeOrderId: "buy-exchange",
-      side: "buy",
-      status: "filled",
-      positionId: null,
-    });
-    conn.db
-      .exec(`INSERT INTO fills (fill_id,order_id,token_id,condition_id,side,price,size,size_usdc,reconciled,filled_at)
-      VALUES ('buy-fill','buy','loser','condition','buy',0.1,10,1,1,'2026-08-01T00:00:11.000Z')`);
+    buyFill("2026-08-01T00:00:11.000Z");
     await reconcileOrders(deps);
     expect(events).toEqual([]);
-    conn.db
-      .exec(`INSERT INTO inventory_lots (lot_id,position_id,token_id,side,size,remaining_size,entry_price,cost_usdc,fill_id,created_at)
-      VALUES ('lot','position','loser','buy',10,0,0.1,1,'buy-fill','2026-08-01 00:00:12')`);
+    buyLot();
     const before = financialRows();
     await reconcileOrders(deps);
     expect(order().status).toBe("cancelled");
     expect(financialRows()).toEqual(before);
+  });
+
+  it.each([
+    ["same-second BUY", sameSecond, "cancelled"],
+    ["BUY a full second earlier", secondEarlier, "open"],
+  ])("attributes whole-second fills at second resolution: %s", async (_case, filledAt, status) => {
+    buyFill(filledAt);
+    buyLot();
+    await reconcileOrders(deps);
+    expect(order().status).toBe(status);
+    if (status === "cancelled")
+      expect(order().cancelReason).toBe(RESOLVED_LOSER_LOCAL_CANCEL_REASON);
+    else expect(events).toEqual([]);
+  });
+
+  it.each([
+    ["same-second own SELL fill", sameSecond, "cancelled"],
+    ["own SELL fill a full second earlier", secondEarlier, "partially-filled"],
+  ])("attributes the SELL's own whole-second fill: %s", async (_case, filledAt, status) => {
+    partialSell(filledAt);
+    await reconcileOrders(deps);
+    expect(order().status).toBe(status);
+    if (status === "cancelled")
+      expect(order().cancelReason).toBe(RESOLVED_LOSER_LOCAL_CANCEL_REASON);
+    else expect(events).toEqual([]);
   });
 
   it.each(["active", "quarantine", "context", "dependencies"])(

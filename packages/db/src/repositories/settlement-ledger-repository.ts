@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import type { Order, SettlementLedgerRepository, SettlementRecord } from "@krabs/domain";
-import { parseInstantMs } from "@krabs/domain";
+import { floorToSecondMs, parseInstantMs } from "@krabs/domain";
 
 interface SettlementLedgerRow {
   settlement_id: string;
@@ -69,7 +69,8 @@ export class SqliteSettlementLedgerRepository implements SettlementLedgerReposit
           fill.tokenId !== fill.orderTokenId ||
           fill.conditionId !== fill.orderConditionId ||
           fill.side !== fill.orderSide ||
-          !(parseInstantMs(fill.filledAt) >= parseInstantMs(fill.orderCreatedAt)),
+          // Exchange fill times are whole seconds; local order creation carries milliseconds.
+          !(parseInstantMs(fill.filledAt) >= floorToSecondMs(parseInstantMs(fill.orderCreatedAt))),
       )
     )
       return null;
