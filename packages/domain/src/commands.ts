@@ -93,6 +93,7 @@ export type CancelOrderReason =
   | "maker_fast_cancel"
   | "maker_capture_reprice"
   | "bounce_ask_capture_reprice"
+  | "bounce_cleanup_rebuild"
   | "phantom_missing_on_exchange"
   | "submit_unknown_recovery"
   | "startup_pending_buy_recovery"

@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { bootstrapLedgerDb, SqliteOrderRepository, SqliteFillRepository } from "@krabs/db";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   AlgoDecisionModule,
   conversionSkipReEvalDelayMs,
@@ -10805,6 +10805,224 @@ describe("AlgoDecisionModule", () => {
       expect((mod as any).dirtyTokenIds.has("token-waiter-a")).toBe(false);
       expect((mod as any).dirtyTokenIds.has("token-waiter-b")).toBe(true);
 
+      await mod.stop();
+    });
+  });
+
+  // docs/plans/2026-10-05-bounce-cleanup-rebuild.md: a missing rung beside a working cleanup that
+  // execution cannot prove as supplemental must change the ladder state, not re-propose the rung.
+  describe("bounce cleanup rebuild", () => {
+    const tokenId = "token-bounce-cleanup-rebuild";
+
+    async function setupRebuild(cleanupOverrides: Partial<Order> = {}) {
+      const legState = makeSellReadyLegState(tokenId, {
+        firstTradePrice: 0.008,
+        cumulativeBuySize: 120,
+        cumulativeBuyNotional: 0.96,
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const position = makeOpenPosition(tokenId, {
+        size: 120,
+        avgEntryPrice: 0.008,
+        costBasisUsdc: 0.96,
+        exitOwner: "bounce",
+      });
+      const ladderId = `${tokenId}:${legState.firstTradeAt}`;
+      const orders = [9, 12, 90].map((size, rungIndex) =>
+        makeOrder(tokenId, {
+          orderId: createOrderId(`rebuild-rung-${rungIndex}`),
+          positionId: position.positionId,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          size,
+          exchangeOrderId: `exchange-rung-${rungIndex}`,
+          metadata: {
+            bounceRung: {
+              ladderId,
+              rungIndex,
+              originalPositionSize: 30,
+              ...(rungIndex === 2 ? { isCleanupRung: true } : {}),
+            },
+          },
+          ...(rungIndex === 2 ? cleanupOverrides : {}),
+        }),
+      );
+      const mod = buildModule({
+        positionRepo: createPositionRepoForOpenPositions([
+          position,
+        ]) as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: {
+          findByTokenId: vi.fn(() => orders),
+          findRecentByTokenId: vi.fn(() => orders),
+          findOpen: vi.fn(() => []),
+          hasNonterminalBounceAskCaptureIntentForPosition: vi.fn(() => false),
+        } as unknown as OrderRepository,
+        fillRepo: { findByOrderIds: vi.fn(() => []), findByOrderId: vi.fn(() => []) },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      } as any);
+      await mod.start();
+      const market = {
+        ...makeMarket(tokenId, null, 0.0275),
+        tickSize: 0.001,
+        minOrderSize: 5,
+        bestBid: 0.005,
+        bestAsk: 0.05,
+        spread: 0.045,
+      };
+      const signals: import("@krabs/domain").Signal[] = [];
+      const cancels: RuntimeEventMap["CancelOrderRequested"][] = [];
+      bus.subscribe("SignalProduced", async ({ signal }) => {
+        signals.push(signal);
+      });
+      bus.subscribe("CancelOrderRequested", async (payload) => {
+        cancels.push(payload);
+      });
+      const marketUpdate = () =>
+        (bus as any).emit("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+      const reject = (overrides: Partial<RuntimeEventMap["OrderRejected"]> = {}) =>
+        (bus as any).emit(
+          "OrderRejected",
+          makeR23NoOrderIdRejected(tokenId, Date.now(), {
+            side: "sell",
+            decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+            reason: "invalid-exit-coverage-cleanup",
+            errorCode: "LIVE_POLICY_BLOCKED" as RuntimeEventMap["OrderRejected"]["errorCode"],
+            exchangeErrorDetails: {},
+            ...overrides,
+          }),
+        );
+      const cleanup = orders[2]!;
+      const setCleanup = (changes: Partial<Order>) => {
+        orders[2] = { ...orders[2]!, ...changes };
+      };
+      return { mod, signals, cancels, marketUpdate, reject, cleanup, setCleanup };
+    }
+
+    function expectMissingOrdinaryRung(signal: import("@krabs/domain").Signal | undefined) {
+      expect(signal).toMatchObject({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        bounceRung: { rungIndex: 2 },
+      });
+      expect(signal!.bounceRung).not.toHaveProperty("isCleanupRung");
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.parse("2026-10-05T12:00:00.000Z"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("cancels the working cleanup and holds the rung after an unprovable supplemental rejection", async () => {
+      const { mod, signals, cancels, marketUpdate, reject, cleanup } = await setupRebuild();
+      await marketUpdate();
+      expect(signals).toHaveLength(1);
+      expectMissingOrdinaryRung(signals[0]);
+
+      await reject();
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.map(({ command }) => command) }).toEqual({
+        signals: 1,
+        cancels: [
+          {
+            type: "CancelOrderCommand",
+            commandId: expect.any(String),
+            orderId: cleanup.orderId,
+            reason: "bounce_cleanup_rebuild",
+          },
+        ],
+      });
+      const successorCheck = await cancels[0]!.successorMinimum?.();
+      expect(successorCheck?.()).toBe(true);
+      await mod.stop();
+    });
+
+    it("re-arms the token at once when the rebuild cancel lands", async () => {
+      const { mod, signals, reject, marketUpdate, cleanup, setCleanup } = await setupRebuild();
+      await marketUpdate();
+      await reject();
+      setCleanup({ status: "cancelled", cancelReason: "bounce_cleanup_rebuild" });
+
+      await (bus as any).emit("OrderCancelled", {
+        commandId: createCommandId("rebuild-cancel"),
+        orderId: cleanup.orderId,
+        tokenId: cleanup.tokenId,
+        conditionId: cleanup.conditionId,
+        reason: "bounce_cleanup_rebuild",
+        signalReason: cleanup.signalReason,
+        timestamp: Date.now(),
+      });
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(signals).toHaveLength(2);
+      expectMissingOrdinaryRung(signals[1]);
+      await mod.stop();
+    });
+
+    it("releases the hold when the ladder's orders change", async () => {
+      const { mod, signals, reject, marketUpdate, setCleanup } = await setupRebuild();
+      await marketUpdate();
+      await reject();
+      setCleanup({ status: "partially-filled" });
+
+      await marketUpdate();
+
+      expect(signals).toHaveLength(2);
+      await mod.stop();
+    });
+
+    it("releases an unchanged hold after the full-sweep interval", async () => {
+      const { mod, signals, reject, marketUpdate } = await setupRebuild();
+      await marketUpdate();
+      await reject();
+      const heldAt = Date.now();
+
+      vi.setSystemTime(heldAt + 59_999);
+      await marketUpdate();
+      expect(signals).toHaveLength(1);
+
+      vi.setSystemTime(heldAt + 60_000);
+      await marketUpdate();
+      expect(signals).toHaveLength(2);
+      await mod.stop();
+    });
+
+    it("holds the rung without a cancel while the cleanup is not yet cancellable", async () => {
+      const { mod, signals, cancels, reject, marketUpdate } = await setupRebuild({
+        status: "pending",
+        exchangeOrderId: null,
+      });
+      await marketUpdate();
+      expect(signals).toHaveLength(1);
+
+      await reject();
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.length }).toEqual({
+        signals: 1,
+        cancels: 0,
+      });
+      await mod.stop();
+    });
+
+    it.each([
+      ["another rejection reason", { reason: "exit-coverage-cleanup-in-flight" }],
+      ["a BUY rejection", { side: "buy" as const }],
+      ["an S1 cleanup rejection", { decisionRuleId: S1_LADDER_RULE_ID }],
+    ])("leaves %s unheld and uncancelled", async (_label, overrides) => {
+      const { mod, signals, cancels, reject, marketUpdate } = await setupRebuild();
+      await marketUpdate();
+
+      await reject(overrides);
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.length }).toEqual({
+        signals: 2,
+        cancels: 0,
+      });
       await mod.stop();
     });
   });

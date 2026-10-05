@@ -69,6 +69,7 @@ const REASONS: ReadonlySet<string> = new Set([
     "maker_fast_cancel",
     "maker_capture_reprice",
     "bounce_ask_capture_reprice",
+    "bounce_cleanup_rebuild",
     "phantom_missing_on_exchange",
     "submit_unknown_recovery",
     "exit_loss_floor",

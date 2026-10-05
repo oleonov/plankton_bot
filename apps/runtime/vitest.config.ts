@@ -21,7 +21,7 @@ export default defineConfig({
           name: "runtime",
           passWithNoTests: true,
           include: ["src/**/*.test.ts"],
-          exclude: [...defaultExclude, CENSUS_TESTS],
+          exclude: [...defaultExclude, CENSUS_TESTS, "src/**/*.perf.test.ts"],
         },
       },
       {

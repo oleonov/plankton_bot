@@ -69,6 +69,7 @@ import {
   S1_LADDER_RULE_ID,
   BOUNCE_EXIT_TARGET_RULE_ID,
   BOUNCE_EXIT_BACKSTOP_RULE_ID,
+  createCommandId,
   pinnedBounceLadderFractions,
   createEntryFreshEdgeAttribution,
   isGateWhitelisted,
@@ -129,6 +130,7 @@ import {
 } from "../../wallet-buy-budget.js";
 import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
+import { bounceRungMetadata } from "../../exit-coverage-cleanup.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
@@ -760,6 +762,7 @@ const EXACT_NULL_STARTUP_TRANSITION_WARN_WINDOW_MS = 5 * 60_000;
 const R23_PROBE_MAKER_WINDOW_CAP_COOLDOWN_METRIC =
   "r23_probe_maker_window_cap_cooldown_suppressed_total";
 const BOUNCE_RUNG_SELL_CAPACITY_HELD_METRIC = "bounce_rung_sell_capacity_held_total";
+const INVALID_EXIT_COVERAGE_CLEANUP_REASON = "invalid-exit-coverage-cleanup";
 const R23_PROBE_NO_ORDER_ID_COOLDOWN_MS = 15 * 60 * 1000;
 const OPEN_POSITION_STALE_EVALUATION_WARN_MS = 24 * 60 * 60_000;
 const MAKER_WINDOW_CAP_MARKET_INVARIANT_REASONS: ReadonlySet<string> = new Set([
@@ -1132,6 +1135,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly sellCapacityWaitTokenIds = new Set<string>();
   /** Tokens rejected for per_token_sell_limit; a cancel on the token frees a slot and re-arms it. */
   private readonly sellSlotWaitTokenIds = new Set<string>();
+  /** Bounce rungs execution could not admit beside a working cleanup; see holdBounceRungForRebuild. */
+  private readonly bounceRebuildHolds = new Map<string, { fingerprint: string; heldAt: number }>();
   private bounceTradingDisabledUntilMs = 0;
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
@@ -1289,6 +1294,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.probeOpenPositionBlocks.clear();
     this.sellCapacityWaitTokenIds.clear();
     this.sellSlotWaitTokenIds.clear();
+    this.bounceRebuildHolds.clear();
     this.bounceTradingDisabledUntilMs = 0;
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
@@ -1779,6 +1785,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
     if (
       this.sellSlotWaitTokenIds.delete(String(payload.tokenId)) ||
+      payload.reason === "bounce_cleanup_rebuild" ||
       this.isCurrentBounceTargetStaleTtlCancellation(payload)
     ) {
       this.markDirty(payload.tokenId, "retry");
@@ -1835,6 +1842,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (this.isR23ProbeMakerWindowCapRejection(payload)) {
       this.activateR23ProbeMakerWindowCapCooldown(payload);
     }
+    await this.startBounceCleanupRebuild(payload);
 
     const clientOrderId = String(payload.clientOrderId);
     const tokenId = this.clientOrderToToken.get(clientOrderId);
@@ -2202,6 +2210,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         continue;
       }
       if (this.holdBounceRungForSellCapacity(plan.signal)) continue;
+      if (this.holdBounceRungForRebuild(plan.signal)) continue;
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
         if (this.hasActivePermanentR23Lineage(result.signal, executionPolicy, now)) {
@@ -2653,6 +2662,90 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.observePostPlannerGuard(signal, "sell_capacity_held");
     this.deps.runtimeMetrics?.writeCounter(BOUNCE_RUNG_SELL_CAPACITY_HELD_METRIC, 1);
     return true;
+  }
+
+  /**
+   * Execution's supplemental proof for a rung beside a working cleanup can fail for good (micro
+   * cap, a residual larger than the rung), and nothing persists that verdict. Cancelling the
+   * cleanup makes the rung ordinary again; until then the hold stops every market update from
+   * re-proposing it. Expiry retries a failed or not yet possible cancel once per full sweep.
+   */
+  private async startBounceCleanupRebuild(
+    payload: RuntimeEventMap["OrderRejected"],
+  ): Promise<void> {
+    if (
+      payload.side !== "sell" ||
+      payload.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      payload.reason !== INVALID_EXIT_COVERAGE_CLEANUP_REASON
+    ) {
+      return;
+    }
+    this.bounceRebuildHolds.set(String(payload.tokenId), {
+      fingerprint: this.bounceRebuildFingerprint(payload.tokenId),
+      heldAt: Date.now(),
+    });
+    await this.requestBounceCleanupRebuild(payload.tokenId);
+  }
+
+  private async requestBounceCleanupRebuild(tokenId: TokenId): Promise<void> {
+    const position = this.findOpenPositionByTokenId(tokenId);
+    if (!position || !isBounceOwned(position)) return;
+    const cleanups = this.workingBounceSells(tokenId).filter(
+      (order) =>
+        bounceRungMetadata(order)?.isCleanupRung === true &&
+        (order.status === "open" || order.status === "partially-filled") &&
+        Boolean(order.exchangeOrderId) &&
+        String(order.positionId ?? "") === String(position.positionId),
+    );
+    if (cleanups.length !== 1) return;
+    const orderId = cleanups[0]!.orderId;
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(`bounce_cleanup_rebuild-${String(orderId)}-${randomUUID()}`),
+        orderId,
+        reason: "bounce_cleanup_rebuild",
+      },
+      // The successor is the planner's re-plan, which has no minimum of its own; declaring one
+      // makes execution re-verify pause at dispatch so a paused runtime never strands the residual.
+      successorMinimum: async () => () => true,
+      timestamp: Date.now(),
+    });
+  }
+
+  private holdBounceRungForRebuild(signal: DecisionSignalDraft): boolean {
+    const tokenKey = String(signal.market.tokenId);
+    const hold = this.bounceRebuildHolds.get(tokenKey);
+    if (
+      hold &&
+      signal.side === "sell" &&
+      signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      signal.bounceRung?.isCleanupRung !== true &&
+      Date.now() - hold.heldAt < FULL_SWEEP_INTERVAL_MS &&
+      hold.fingerprint === this.bounceRebuildFingerprint(signal.market.tokenId)
+    ) {
+      this.observePostPlannerGuard(signal, "bounce_rebuild_held");
+      return true;
+    }
+    this.bounceRebuildHolds.delete(tokenKey);
+    return false;
+  }
+
+  /** Any order or position change on the ladder releases a rebuild hold at once. */
+  private bounceRebuildFingerprint(tokenId: TokenId): string {
+    const orders = this.workingBounceSells(tokenId)
+      .map((order) => `${String(order.orderId)}:${order.status}`)
+      .sort();
+    return `${orders.join(",")}|${this.findOpenPositionByTokenId(tokenId)?.size ?? 0}`;
+  }
+
+  private workingBounceSells(tokenId: TokenId): Order[] {
+    return (this.deps.orderRepo?.findByTokenId(tokenId) ?? []).filter(
+      (order) =>
+        order.side === "sell" &&
+        order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+        isWorkingSellOrderStatus(order.status ?? null),
+    );
   }
 
   /** Capacity is token-dependent (first-exit reserve), so each waiter is probed on its own. */
