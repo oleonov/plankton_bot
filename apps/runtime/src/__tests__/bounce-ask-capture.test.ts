@@ -482,6 +482,53 @@ describe("bounce ASK capture", () => {
     await module.stop();
   });
 
+  describe("beside a working bounce cleanup", () => {
+    const cleanup = (overrides: Partial<Order>) =>
+      order("cleanup", {
+        price: 0.5,
+        metadata: { bounceRung: { isCleanupRung: true } },
+        ...overrides,
+      });
+
+    async function reclaim(others: Order[]) {
+      const { f, module, repo } = await recoveryFixture();
+      f.intent = null;
+      f.sell = {
+        ...f.sell,
+        status: "open",
+        metadata: { bounceAskCaptureLineageV1: f.sell.metadata?.bounceAskCaptureLineageV1 },
+      };
+      repo.findOpen = () => [f.sell, ...others];
+      const claim = vi.spyOn(repo, "claimBounceAskCaptureIntent");
+      (module as any).markets.set(String(tokenId), f.market);
+      await (module as any).tryClaim(f.sell, NOW, (module as any).deps.policySnapshot());
+      await module.stop();
+      return { f, claim };
+    }
+
+    it.each(["open", "pending"] as const)(
+      "leaves an ordinary rung resting beside its position's %s cleanup",
+      async (status) => {
+        const { f, claim } = await reclaim([cleanup({ status })]);
+        expect(claim).not.toHaveBeenCalled();
+        expect(f.intent).toBeNull();
+        expect(f.sell.status).toBe("open");
+      },
+    );
+
+    it.each([
+      ["no cleanup", []],
+      ["another position's cleanup", [cleanup({ positionId: createPositionId("other-position") })]],
+    ])("claims the rung with %s", async (_label, others) => {
+      const { f, claim } = await reclaim(others);
+      expect(claim).toHaveBeenCalledOnce();
+      expect(f.intent).toMatchObject({
+        status: "cancel_pending",
+        predecessorOrderId: f.sell.orderId,
+      });
+    });
+  });
+
   it.each([
     ["throw", "none"],
     ["read-back", "none"],

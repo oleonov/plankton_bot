@@ -39,6 +39,7 @@ import {
   resolveMakerCaptureCancellationAnchorMs,
   type MakerCaptureBookCache,
 } from "../../maker-capture-reprice.js";
+import { bounceRungMetadata } from "../../exit-coverage-cleanup.js";
 import { parseQuoteMotionOrigin } from "../../quote-motion-shadow.js";
 import type { Logger } from "../../logger.js";
 import { prepareSuccessorMinimum } from "../../min-order-size.js";
@@ -175,6 +176,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     let lineage = parseBounceAskCaptureLineage(order);
     if (!lineage) lineage = this.stampRootLineage(order, policy);
     if (!lineage || lineage.replacementIndex >= policy.maxRepricesPerRoot) return;
+    if (this.besideWorkingCleanup(order)) return;
     let state = this.validateState(order, lineage, snapshot);
     if (!state) return;
     const entry = await primeFreshMakerCaptureBook(
@@ -188,7 +190,7 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (!latest || !["open", "partially-filled"].includes(latest.status)) return;
     order = latest;
     state = this.validateState(order, lineage, snapshot);
-    if (!state) return;
+    if (!state || this.besideWorkingCleanup(order)) return;
     const candidate = this.candidate(order, lineage, entry.book, state.market.tickSize);
     if (!candidate.ok) return;
     const identity = buildBounceAskCaptureIdentity(
@@ -232,6 +234,12 @@ export class BounceAskCaptureLifecycleModule implements RuntimeModule {
     if (!this.deps.orderRepo.claimBounceAskCaptureIntent?.(intent)) return;
     if (!this.markClaimed(intent)) return;
     await this.publishCancel(intent);
+  }
+
+  // Beside a working cleanup the re-priced child is supplemental, and execution rejects it
+  // because its size does not prove the exact residual; the rejection rebuilds the cleanup.
+  private besideWorkingCleanup(order: Order): boolean {
+    return hasWorkingBounceCleanup(order, this.deps.orderRepo.findOpen(order.tokenId));
   }
 
   private markClaimed(intent: BounceAskCaptureIntent): boolean {
@@ -940,6 +948,17 @@ function bounceCaptureResidual(
   return Math.min(
     Math.max(0, size - fills.reduce((sum, fill) => sum + fill.size, 0)),
     positionSize,
+  );
+}
+
+function hasWorkingBounceCleanup(order: Order, openOrders: readonly Order[]): boolean {
+  return openOrders.some(
+    (other) =>
+      other.orderId !== order.orderId &&
+      other.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
+      other.side === "sell" &&
+      bounceRungMetadata(other)?.isCleanupRung === true &&
+      String(other.positionId) === String(order.positionId),
   );
 }
 
