@@ -45,6 +45,7 @@ import type { Logger } from "../../../logger.js";
 import { LiveLiteGuard } from "../../../live-lite-guard.js";
 import { BUY_DUPLICATE_DEDUPED_REASON } from "../../../buy-order-lifecycle.js";
 import { createBuySignalBudgetCircuitBreaker } from "../../../wallet-buy-budget.js";
+import { canonicalRecoveryMetadata } from "../../execution/reservation-utils.js";
 
 const PHASE_ONE_ACTIVE_MARKET_CAP = 250;
 
@@ -11025,6 +11026,271 @@ describe("AlgoDecisionModule", () => {
       });
       await mod.stop();
     });
+  });
+
+  describe("bounce cleanup resize", () => {
+    const tokenId = "token-bounce-cleanup-resize";
+    const LEGACY_BOUNCE_POLICY = {
+      ...DEFAULT_EXECUTION_POLICY,
+      bounceExit: {
+        ...DEFAULT_EXECUTION_POLICY.bounceExit,
+        enabled: true,
+        mode: "micro_live" as const,
+        whitelistConditionIds: ["cond-1"],
+      },
+      sellableFlow: { enabled: true, buffer: 1.2, maxEntryUsdc: 5, appliesFromMs: 1 },
+    };
+
+    type ResizeSetup = {
+      position?: Partial<Position>;
+      cleanup?: Partial<Order>;
+      fencedPredecessor?: boolean;
+      executionPolicy?: typeof DEFAULT_EXECUTION_POLICY;
+      maxOrderUsdc?: number;
+    };
+
+    function fenceOf(predecessor: Order, child: Order) {
+      const at = new Date().toISOString();
+      return {
+        version: 1,
+        action: "recover_missing_bounce_exit",
+        operatorCommandId: 574,
+        predecessorOrderId: String(predecessor.orderId),
+        tokenId: String(predecessor.tokenId),
+        conditionId: String(predecessor.conditionId),
+        positionId: String(predecessor.positionId),
+        decisionRuleId: predecessor.decisionRuleId,
+        bounceRungJson: canonicalRecoveryMetadata(predecessor.metadata?.bounceRung),
+        createdAt: at,
+        preOpenSnapshotHash: "a".repeat(64),
+        preFillSnapshotHash: "b".repeat(64),
+        preFillWatermark: "",
+        residualShares: 60,
+        childClientOrderId: String(child.clientOrderId),
+        phase: "complete",
+        fenceCompletedAt: at,
+        postFenceOpenSnapshotHash: "c".repeat(64),
+        postFenceFillSnapshotHash: "d".repeat(64),
+        postFenceFillWatermark: "",
+        completedAt: at,
+        childOrderId: String(child.orderId),
+      };
+    }
+
+    async function setupResize(setup: ResizeSetup = {}) {
+      const legState = makeSellReadyLegState(tokenId, {
+        firstTradePrice: 0.008,
+        cumulativeBuySize: 120,
+        cumulativeBuyNotional: 0.96,
+      });
+      legStateRepo = createMockLegStateRepo([legState]);
+      const position = makeOpenPosition(tokenId, {
+        size: 120,
+        avgEntryPrice: 0.008,
+        costBasisUsdc: 0.96,
+        exitOwner: "bounce",
+        ...setup.position,
+      });
+      const bounceRung = {
+        ladderId: `${tokenId}:${legState.firstTradeAt}`,
+        rungIndex: 0,
+        originalPositionSize: 40,
+        ladderFractions: [1],
+      };
+      const order = (id: string, size: number, rung: object, overrides: Partial<Order> = {}) =>
+        makeOrder(tokenId, {
+          orderId: createOrderId(`resize-${id}`),
+          clientOrderId: `client-resize-${id}` as Order["clientOrderId"],
+          positionId: position.positionId,
+          decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+          size,
+          exchangeOrderId: `exchange-resize-${id}`,
+          metadata: { bounceRung: rung },
+          ...overrides,
+        });
+      const cleanupRung = { ...bounceRung, isCleanupRung: true };
+      const orders = [
+        order("ordinary", 40, bounceRung),
+        order("cleanup", 60, cleanupRung, setup.cleanup),
+      ];
+      if (setup.fencedPredecessor) {
+        const predecessor = order("predecessor", 60, cleanupRung);
+        predecessor.metadata = {
+          ...predecessor.metadata,
+          exitRecoveryFenceV1: fenceOf(predecessor, orders[1]!),
+        };
+        orders.push(predecessor);
+      }
+      const mod = buildModule({
+        positionRepo: createPositionRepoForOpenPositions([
+          position,
+        ]) as unknown as import("@krabs/domain").PositionRepository,
+        orderRepo: {
+          findByTokenId: vi.fn(() => orders),
+          findRecentByTokenId: vi.fn(() => orders),
+          findOpen: vi.fn(() => []),
+          hasNonterminalBounceAskCaptureIntentForPosition: vi.fn(() => false),
+        } as unknown as OrderRepository,
+        fillRepo: { findByOrderIds: vi.fn(() => []), findByOrderId: vi.fn(() => []) },
+        executionPolicy: () => setup.executionPolicy ?? DEFAULT_EXECUTION_POLICY,
+        liveLiteGuard:
+          setup.maxOrderUsdc === undefined
+            ? undefined
+            : new LiveLiteGuard({
+                maxOpenValueUsdc: 500,
+                maxOrderUsdc: setup.maxOrderUsdc,
+                maxActiveMarkets: 250,
+              }),
+      } as any);
+      await mod.start();
+      const market = {
+        ...makeMarket(tokenId, null, 0.0275),
+        tickSize: 0.001,
+        minOrderSize: 5,
+        bestBid: 0.005,
+        bestAsk: 0.05,
+        spread: 0.045,
+      };
+      const signals: import("@krabs/domain").Signal[] = [];
+      const cancels: RuntimeEventMap["CancelOrderRequested"][] = [];
+      bus.subscribe("SignalProduced", async ({ signal }) => {
+        signals.push(signal);
+      });
+      bus.subscribe("CancelOrderRequested", async (payload) => {
+        cancels.push(payload);
+      });
+      const marketUpdate = () =>
+        (bus as any).emit("NormalizedMarketUpdated", { markets: [market], timestamp: Date.now() });
+      const cleanup = orders[1]!;
+      const cancelCleanup = async () => {
+        orders[1] = { ...cleanup, status: "cancelled", cancelReason: "bounce_cleanup_rebuild" };
+        await (bus as any).emit("OrderCancelled", {
+          commandId: createCommandId("resize-cancel"),
+          orderId: cleanup.orderId,
+          tokenId: cleanup.tokenId,
+          conditionId: cleanup.conditionId,
+          reason: "bounce_cleanup_rebuild",
+          signalReason: cleanup.signalReason,
+          timestamp: Date.now(),
+        });
+        await vi.advanceTimersByTimeAsync(1);
+      };
+      const cancelledOrderIds = () => cancels.map(({ command }) => String(command.orderId));
+      return { mod, signals, cancels, marketUpdate, cleanup, cancelCleanup, cancelledOrderIds };
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.parse("2026-10-07T12:00:00.000Z"));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("replaces a working cleanup once instead of proposing a second cleanup for the growth", async () => {
+      const { mod, signals, cancels, marketUpdate, cleanup } = await setupResize();
+      await marketUpdate();
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.map(({ command }) => command) }).toEqual({
+        signals: 0,
+        cancels: [
+          {
+            type: "CancelOrderCommand",
+            commandId: expect.any(String),
+            orderId: cleanup.orderId,
+            reason: "bounce_cleanup_rebuild",
+          },
+        ],
+      });
+      await mod.stop();
+    });
+
+    it("re-plans one cleanup for the whole residual once the cleanup is cancelled", async () => {
+      const { mod, signals, marketUpdate, cancelCleanup } = await setupResize();
+      await marketUpdate();
+
+      await cancelCleanup();
+
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toMatchObject({
+        side: "sell",
+        decisionRuleId: BOUNCE_EXIT_TARGET_RULE_ID,
+        suggestedSize: 80,
+        bounceRung: { isCleanupRung: true },
+      });
+      await mod.stop();
+    });
+
+    it("drops the candidate without a cancel while the cleanup is not cancellable", async () => {
+      const { mod, signals, cancels, marketUpdate } = await setupResize({
+        cleanup: { status: "pending", exchangeOrderId: null },
+      });
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.length }).toEqual({
+        signals: 0,
+        cancels: 0,
+      });
+      await mod.stop();
+    });
+
+    it("leaves a fully covered ladder alone", async () => {
+      const { mod, signals, cancels, marketUpdate } = await setupResize({
+        position: { size: 100 },
+      });
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancels: cancels.length }).toEqual({
+        signals: 0,
+        cancels: 0,
+      });
+      await mod.stop();
+    });
+
+    it("cancels the live recovery child, not its fenced predecessor", async () => {
+      const { mod, signals, marketUpdate, cleanup, cancelledOrderIds } = await setupResize({
+        fencedPredecessor: true,
+      });
+      await marketUpdate();
+
+      expect({ signals: signals.length, cancelled: cancelledOrderIds() }).toEqual({
+        signals: 0,
+        cancelled: [String(cleanup.orderId)],
+      });
+      await mod.stop();
+    });
+
+    it("keeps a legacy null-owner position's cleanup signal and cancels nothing", async () => {
+      const { mod, signals, cancels, marketUpdate } = await setupResize({
+        position: { exitOwner: null, entryLane: "GATE" },
+        executionPolicy: LEGACY_BOUNCE_POLICY,
+      });
+      await marketUpdate();
+
+      expect(cancels).toHaveLength(0);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toMatchObject({ suggestedSize: 20, bounceRung: { isCleanupRung: true } });
+      await mod.stop();
+    });
+
+    it.each([
+      { maxOrderUsdc: 25, cancels: 1 },
+      { maxOrderUsdc: 0.01, cancels: 0 },
+    ])(
+      "checks the replacement against a $maxOrderUsdc live-lite order cap before cancelling",
+      async ({ maxOrderUsdc, cancels: expectedCancels }) => {
+        const { mod, signals, cancels, marketUpdate } = await setupResize({ maxOrderUsdc });
+        await marketUpdate();
+
+        expect({ signals: signals.length, cancels: cancels.length }).toEqual({
+          signals: 0,
+          cancels: expectedCancels,
+        });
+        await mod.stop();
+      },
+    );
   });
 
   // Phase 3 (docs/plans/2026-07-19-sellable-sizing-bounce-for-all.md): the

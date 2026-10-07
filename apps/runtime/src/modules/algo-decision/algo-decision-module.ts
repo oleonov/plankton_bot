@@ -131,6 +131,7 @@ import {
 import { isBounceLadderEligible } from "../exit-ownership/bounce-eligibility.js";
 import { isBounceOwned } from "../exit-ownership/is-bounce-owned.js";
 import { bounceRungMetadata } from "../../exit-coverage-cleanup.js";
+import { bounceRungsConflict } from "../../bounce-rung-identity.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
 import { DecisionWorkerPool } from "./decision-worker-pool.js";
@@ -2210,6 +2211,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         continue;
       }
       if (this.holdBounceRungForSellCapacity(plan.signal)) continue;
+      if (await this.resizeBounceCleanup(plan.signal)) continue;
       if (this.holdBounceRungForRebuild(plan.signal)) continue;
       const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
@@ -2713,22 +2715,71 @@ export class AlgoDecisionModule implements RuntimeModule {
     });
   }
 
-  private holdBounceRungForRebuild(signal: DecisionSignalDraft): boolean {
-    const tokenKey = String(signal.market.tokenId);
-    const hold = this.bounceRebuildHolds.get(tokenKey);
+  /**
+   * Execution admits one working cleanup per ladder, so a cleanup for a residual that grew after
+   * the cleanup was placed would be rejected on every evaluation. Replacing the working cleanup
+   * lets the planner re-size it to the whole residual.
+   */
+  private async resizeBounceCleanup(signal: DecisionSignalDraft): Promise<boolean> {
+    const rung = signal.bounceRung;
+    const tokenId = signal.market.tokenId;
     if (
-      hold &&
+      signal.side !== "sell" ||
+      signal.decisionRuleId !== BOUNCE_EXIT_TARGET_RULE_ID ||
+      rung?.isCleanupRung !== true ||
+      !isBounceOwned(this.findOpenPositionByTokenId(tokenId))
+    ) {
+      return false;
+    }
+    const working = this.workingBounceSells(tokenId).find((order) => {
+      const existing = bounceRungMetadata(order);
+      return existing !== null && bounceRungsConflict(rung, existing, true);
+    });
+    if (working === undefined) return false;
+    this.observePostPlannerGuard(signal, "bounce_cleanup_resize");
+    if (this.activeRebuildHold(tokenId) || !this.replacementWithinOrderCap(signal, working)) {
+      return true;
+    }
+    this.bounceRebuildHolds.set(String(tokenId), {
+      fingerprint: this.bounceRebuildFingerprint(tokenId),
+      heldAt: Date.now(),
+    });
+    await this.requestBounceCleanupRebuild(tokenId);
+    return true;
+  }
+
+  /**
+   * Execution rejects a cleanup above the live-lite per-order cap, so cancelling a cleanup whose
+   * replacement would exceed it trades a working exit for none. The working order's full size is
+   * an upper bound on the replacement (partial fills only shrink it).
+   */
+  private replacementWithinOrderCap(signal: DecisionSignalDraft, working: Order): boolean {
+    const guard = this.deps.liveLiteGuard;
+    if (!guard?.isActive) return true;
+    return guard.isOrderWithinCap(signal.suggestedPrice * (signal.suggestedSize + working.size));
+  }
+
+  private holdBounceRungForRebuild(signal: DecisionSignalDraft): boolean {
+    if (
       signal.side === "sell" &&
       signal.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
       signal.bounceRung?.isCleanupRung !== true &&
-      Date.now() - hold.heldAt < FULL_SWEEP_INTERVAL_MS &&
-      hold.fingerprint === this.bounceRebuildFingerprint(signal.market.tokenId)
+      this.activeRebuildHold(signal.market.tokenId)
     ) {
       this.observePostPlannerGuard(signal, "bounce_rebuild_held");
       return true;
     }
-    this.bounceRebuildHolds.delete(tokenKey);
+    this.bounceRebuildHolds.delete(String(signal.market.tokenId));
     return false;
+  }
+
+  private activeRebuildHold(tokenId: TokenId): boolean {
+    const hold = this.bounceRebuildHolds.get(String(tokenId));
+    return (
+      hold !== undefined &&
+      Date.now() - hold.heldAt < FULL_SWEEP_INTERVAL_MS &&
+      hold.fingerprint === this.bounceRebuildFingerprint(tokenId)
+    );
   }
 
   /** Any order or position change on the ladder releases a rebuild hold at once. */
@@ -2744,7 +2795,8 @@ export class AlgoDecisionModule implements RuntimeModule {
       (order) =>
         order.side === "sell" &&
         order.decisionRuleId === BOUNCE_EXIT_TARGET_RULE_ID &&
-        isWorkingSellOrderStatus(order.status ?? null),
+        isWorkingSellOrderStatus(order.status ?? null) &&
+        !isExitRecoveryFencedPredecessor(order),
     );
   }
 

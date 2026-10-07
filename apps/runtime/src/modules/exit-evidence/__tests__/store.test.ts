@@ -41,10 +41,13 @@ function quality(key: string): number {
   ).count;
 }
 beforeEach(() => {
+  // recover() stops after a 10 ms wall-clock budget; a loaded CI host must not decide these tests.
+  vi.spyOn(performance, "now").mockReturnValue(0);
   dir = realpathSync(mkdtempSync(join(tmpdir(), "exit-evidence-store-")));
   store = new EvidenceStore(join(dir, "exit-evidence.db"), NOW);
 });
 afterEach(() => {
+  vi.mocked(performance.now).mockRestore();
   store?.close();
   rmSync(dir, { recursive: true, force: true });
 });
