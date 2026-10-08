@@ -366,6 +366,30 @@ describe("LedgerRetentionModule", () => {
     ]);
   });
 
+  it("expires shadow decision telemetry after 30 days but keeps operational events", async () => {
+    insertRiskEvent("track_q_shadow", '{"age":"20d"}', "2026-04-05T00:00:00.000Z");
+    insertRiskEvent("track_q_shadow", '{"age":"40d"}', "2026-03-16T00:00:00.000Z");
+    insertRiskEvent("maker_entry_shadow", '{"age":"20d"}', "2026-04-05T00:00:00.000Z");
+    insertRiskEvent("maker_entry_shadow", '{"age":"40d"}', "2026-03-16T00:00:00.000Z");
+    insertRiskEvent("signal_rejected", '{"age":"40d"}', "2026-03-16T00:00:00.000Z");
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    expect(
+      db.prepare("SELECT event_type, payload FROM risk_events ORDER BY event_type").all(),
+    ).toEqual([
+      { event_type: "maker_entry_shadow", payload: '{"age":"20d"}' },
+      { event_type: "signal_rejected", payload: '{"age":"40d"}' },
+      { event_type: "track_q_shadow", payload: '{"age":"20d"}' },
+    ]);
+  });
+
   it("deletes planner suppression rollups with the signal telemetry TTL", async () => {
     insertRiskEvent(
       "planner_suppressed_rollup",
