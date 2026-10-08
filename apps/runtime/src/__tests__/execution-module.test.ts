@@ -4078,6 +4078,175 @@ describe("ExecutionModule", () => {
     await execution.stop();
   });
 
+  // Prod 46043424…: the 4-decimal Data API snapshot clamps an exactly-covering supplemental by
+  // 0.000044 sh; only the exact CLOB balance can prove the residual.
+  const PRECISE_SUPPLEMENTAL_SIZE = 39.130044;
+  const ROUNDED_SUPPLEMENTAL_WALLET = 39.13;
+
+  function preciseSupplementalFixture(
+    walletSnapshot?: number,
+    { residual, tokenMinimum }: { residual?: number; tokenMinimum?: TokenMinimumAuthority } = {},
+  ) {
+    const base = productionSupplementalFixture("Derek");
+    const candidateSize = residual ?? base.command.size;
+    const size = PRECISE_SUPPLEMENTAL_SIZE + candidateSize - base.command.size;
+    const position = { ...base.position, size, costBasisUsdc: size * base.position.avgEntryPrice };
+    const [rung2, rung1, cleanup] = base.orders;
+    const cleanupSize = 15.000044;
+    const cleanupRung = cleanup!.metadata!.bounceRung as Record<string, unknown>;
+    const rows = trackPreparedRows(orderRepo, [
+      rung2!,
+      rung1!,
+      {
+        ...cleanup!,
+        size: cleanupSize,
+        metadata: { bounceRung: { ...cleanupRung, uncommittedRemainder: cleanupSize } },
+      },
+    ]);
+    const positionRepo = createMockPositionRepo(position);
+    positionRepo.findActiveByTokenId = vi.fn(() => [position]);
+    const store = new ExchangeStateStore();
+    store.updateWalletPosition(position.tokenId, walletSnapshot ?? Math.floor(size * 1e4) / 1e4);
+    const state = { paused: false };
+    const bounceRung = base.command.metadata!.bounceRung as Record<string, unknown>;
+    const command: PlaceOrderCommand = {
+      ...base.command,
+      size: candidateSize,
+      metadata: {
+        ...base.command.metadata,
+        bounceRung: {
+          ...bounceRung,
+          remainingPositionSize: size,
+          uncommittedRemainder: candidateSize,
+        },
+      },
+    };
+    (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockResolvedValue(size);
+    const execution = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo: createMockInventoryLotRepo(position),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeMode: "live-lite",
+      runtimeControl: { isPaused: () => state.paused },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      exchangeStateStore: store,
+      tokenMinimum,
+    });
+    const rejected: string[] = [];
+    bus.subscribe("OrderRejected", async (event) => void rejected.push(event.reason));
+    const publish = () => bus.publish("PlaceOrderRequested", { command, timestamp: Date.now() });
+    return { execution, command, position, positionRepo, rows, store, state, rejected, publish };
+  }
+
+  it.each([
+    ["rounded", ROUNDED_SUPPLEMENTAL_WALLET, 2],
+    ["exact", PRECISE_SUPPLEMENTAL_SIZE, 0],
+  ] as const)(
+    "bounce supplemental with a %s wallet snapshot posts its full exact residual",
+    async (_name, walletSnapshot, clobReads) => {
+      const f = preciseSupplementalFixture(walletSnapshot);
+      await f.execution.start();
+      await f.publish();
+      expect(f.rejected).toEqual([]);
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledOnce();
+      expect(gateway.prepareOrder).toHaveBeenCalledWith(
+        expect.objectContaining({ size: f.command.size }),
+      );
+      expect(f.rows.find((row) => row.clientOrderId === f.command.clientOrderId)).toMatchObject({
+        size: f.command.size,
+        status: "open",
+      });
+      expect(gateway.getPositionBalance).toHaveBeenCalledTimes(clobReads);
+      await f.execution.stop();
+    },
+  );
+
+  it.each([
+    ["at admission", [ROUNDED_SUPPLEMENTAL_WALLET], 0],
+    ["at the submit re-proof", [PRECISE_SUPPLEMENTAL_SIZE, ROUNDED_SUPPLEMENTAL_WALLET], 1],
+  ] as const)(
+    "bounce supplemental short of the exact CLOB balance %s is rejected, never posted clamped",
+    async (_name, balances, prepared) => {
+      const f = preciseSupplementalFixture();
+      const read = gateway.getPositionBalance as ReturnType<typeof vi.fn>;
+      for (const balance of balances) read.mockResolvedValueOnce(balance);
+      await f.execution.start();
+      await f.publish();
+      expect(f.rejected).toEqual(["exit-coverage-cleanup-state-changed"]);
+      expect(gateway.getPositionBalance).toHaveBeenCalledTimes(balances.length);
+      expect(gateway.prepareOrder).toHaveBeenCalledTimes(prepared);
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      await f.execution.stop();
+    },
+  );
+
+  // The precise fingerprint ignores the token minimum, yet canonical supplemental sizing reads it:
+  // a 10 sh residual is the idx0 rung (7.554) plus its orphan 2.446 only while the minimum is 5.
+  it.each([
+    [5, []],
+    [2, ["exit-coverage-cleanup-state-changed"]],
+  ] as const)(
+    "bounce supplemental re-matches its sizing after the token minimum becomes %s during the submit re-proof",
+    async (nextMinimum, expectedRejections) => {
+      const minimum = { value: 5 };
+      const authority = new TokenMinimumAuthority(
+        async (id) => {
+          authority.complete(authority.begin([id]), new Map([[id, minimum.value]]));
+          return true;
+        },
+        () => {},
+      );
+      const f = preciseSupplementalFixture(undefined, { residual: 10, tokenMinimum: authority });
+      const tokenId = String(f.position.tokenId);
+      authority.complete(authority.begin([tokenId]), new Map([[tokenId, minimum.value]]));
+      (gateway.getPositionBalance as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(f.position.size)
+        .mockImplementationOnce(async () => {
+          minimum.value = nextMinimum;
+          authority.complete(authority.begin([tokenId]), new Map([[tokenId, nextMinimum]]));
+          return f.position.size;
+        });
+      await f.execution.start();
+      await f.publish();
+      expect(f.rejected).toEqual(expectedRejections);
+      expect(gateway.getPositionBalance).toHaveBeenCalledTimes(2);
+      expect(gateway.submitPreparedOrder).toHaveBeenCalledTimes(expectedRejections.length ? 0 : 1);
+      await f.execution.stop();
+    },
+  );
+
+  it.each(["pause", "position", "wallet-snapshot", "competitor", "stop"] as const)(
+    "bounce supplemental invalidates its precise observation when %s changes during the read",
+    async (change) => {
+      const f = preciseSupplementalFixture();
+      (gateway.getPositionBalance as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+        if (change === "pause") f.state.paused = true;
+        if (change === "position")
+          f.positionRepo.findByTokenId = vi.fn(() => ({ ...f.position, size: 39 }));
+        if (change === "wallet-snapshot")
+          f.store.updateWalletPosition(f.position.tokenId, 39.13, Date.now() + 1);
+        if (change === "competitor")
+          f.rows.push(openSellAt(0.1, { size: 5, positionId: f.position.positionId }));
+        if (change === "stop") await f.execution.stop();
+        return PRECISE_SUPPLEMENTAL_SIZE;
+      });
+      await f.execution.start();
+      await f.publish();
+      expect(f.rejected).toEqual(["exit-coverage-cleanup-state-changed"]);
+      expect(gateway.getPositionBalance).toHaveBeenCalledOnce();
+      expect(gateway.prepareOrder).not.toHaveBeenCalled();
+      expect(gateway.submitPreparedOrder).not.toHaveBeenCalled();
+      await f.execution.stop();
+    },
+  );
+
   it.each(["present", "late-linked"] as const)(
     "does not let ordinary S1 cancel %s same-cycle PROFILE coverage",
     async (timing) => {

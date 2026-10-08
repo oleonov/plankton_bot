@@ -3723,7 +3723,10 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     let decision = this.getReservationDecision(cmd, notional, cleanupKind != null);
-    if (cleanupKind === "bounce" && this.isWalletOnlyCleanupClamp(cmd, decision)) {
+    if (
+      (cleanupKind === "bounce" || cleanupKind === "bounce-supplemental") &&
+      this.isWalletOnlyCleanupClamp(cmd, decision)
+    ) {
       const observed = await this.readPreciseCleanupAvailability(cmd);
       const precise = this.confirmPreciseCleanupObservation(cmd, observed);
       if (!precise) {
@@ -6367,12 +6370,19 @@ export class ExecutionModule implements RuntimeModule {
       position.tokenId !== cmd.tokenId ||
       position.positionId !== cmd.positionId ||
       position.conditionId !== cmd.conditionId ||
-      this.exitCoverageCleanupKind(cmd) !== "bounce" ||
+      !this.isPreciseBounceCoverage(cmd) ||
       !hasValidBounceCoverageTransport(cmd)
     )
       return null;
     if (this.evaluateSellExitLossFloor(cmd, cmd.price).block) return null;
     return position;
+  }
+
+  private isPreciseBounceCoverage(cmd: PlaceOrderCommand): boolean {
+    return (
+      this.exitCoverageCleanupKind(cmd) === "bounce" ||
+      this.activeBounceSupplementalClientIds.has(String(cmd.clientOrderId))
+    );
   }
 
   private preciseCleanupReservations(cmd: PlaceOrderCommand, ownPrepared?: Order) {
@@ -7808,17 +7818,12 @@ export class ExecutionModule implements RuntimeModule {
       if (this.activeExitRecoveryClientIds.has(String(cmd.clientOrderId))) {
         await this.assertRecoverySubmitBoundary(cmd);
       }
-      if (this.exitCoverageChanged(cmd, replacement)) {
-        return {
-          kind: "rejected" as const,
-          errorCode: ExchangeErrorCode.LivePolicyBlocked,
-          errorMessage: "exit-coverage-cleanup-state-changed",
-          errorDetails: null,
-        };
-      }
       if (this.preciseCleanupClientIds.has(String(cmd.clientOrderId))) {
-        const observed = await this.readPreciseCleanupAvailability(cmd, pending);
-        const precise = this.confirmPreciseCleanupObservation(cmd, observed, pending);
+        // A supplemental row is persisted only after this proof; an unsaved row cannot be
+        // proved as its own prepared order and is already absent from the open set.
+        const ownPrepared = pendingPersisted ? pending : undefined;
+        const observed = await this.readPreciseCleanupAvailability(cmd, ownPrepared);
+        const precise = this.confirmPreciseCleanupObservation(cmd, observed, ownPrepared);
         if (
           !precise ||
           this.getReservationDecision(cmd, params.price * params.size, true, precise).kind !==
@@ -7831,6 +7836,16 @@ export class ExecutionModule implements RuntimeModule {
             errorDetails: null,
           };
         }
+      }
+      // Last before persisting: the awaited balance read above can outlive a state change (e.g. the
+      // token minimum) that the precise fingerprint does not cover.
+      if (this.exitCoverageChanged(cmd, replacement)) {
+        return {
+          kind: "rejected" as const,
+          errorCode: ExchangeErrorCode.LivePolicyBlocked,
+          errorMessage: "exit-coverage-cleanup-state-changed",
+          errorDetails: null,
+        };
       }
       if (cleanupPending) persistPending();
       const beforeInvoke = () => {
