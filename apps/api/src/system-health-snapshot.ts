@@ -234,6 +234,14 @@ export function readReconciliationHealth(
   }
 }
 
+// Quarantined orders close themselves through the 24h + 7d exchange-absence rule, so a
+// quarantine is a calm state (the StatusBar shows it as a blue QUARANTINE badge), not amber.
+const CALM_RECONCILIATION_KINDS: ReadonlySet<ReconciliationHealthKind> = new Set([
+  "ok",
+  "acknowledged_external_state_unknown",
+  "exchange_absent_quarantine",
+]);
+
 function reconciliationDrift(kind: ReconciliationHealthKind): boolean {
   return kind === "position_drift" || kind === "unresolved_missing" || kind === "other_drift";
 }
@@ -502,7 +510,7 @@ export function computeModuleSeverities(inp: ModuleHealthInputs): {
   const reconSev: Sev =
     inp.reconciliation.kind === "position_drift"
       ? "crit"
-      : inp.reconciliation.kind === "ok"
+      : CALM_RECONCILIATION_KINDS.has(inp.reconciliation.kind)
         ? live
         : "warn";
 

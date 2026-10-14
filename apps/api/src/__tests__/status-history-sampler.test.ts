@@ -154,7 +154,9 @@ describe("StatusHistorySampler — deploy warm-up / pause states", () => {
     expect(row.sev).toBe("warn");
   });
 
-  it("records acknowledged external-state quarantine as warning, not green", () => {
+  // Startup quarantine closes itself through the 24h + 7d exchange-absence rule (2026-09-30),
+  // so it is a calm state like the StatusBar QUARANTINE badge, not an amber warning.
+  it("records startup quarantine as healthy", () => {
     const s = sampler();
     s.tick(T);
     seedHeartbeat(T + 30_000);
@@ -170,8 +172,27 @@ describe("StatusHistorySampler — deploy warm-up / pause states", () => {
     const row = ctrl.db
       .prepare("SELECT sev FROM status_history WHERE series = 'module:reconciliation'")
       .get() as { sev: string };
-    expect(row.sev).toBe("warn");
-    expect(uptimeRow().sev).toBe("warn");
+    expect(row.sev).toBe("ok");
+    expect(uptimeRow().sev).toBe("ok");
+  });
+
+  it("records exchange-absence quarantine on a clean pass as healthy", () => {
+    const s = sampler();
+    s.tick(T);
+    seedHeartbeat(T + 30_000);
+    seedMarket(T + 30_000);
+    const at = new Date(T + 30_000).toISOString();
+    ledger
+      .prepare(
+        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, NULL, ?)",
+      )
+      .run("reconciliation_exchange_absent_quarantined", at);
+    s.tick(T + 60_000);
+    const row = ctrl.db
+      .prepare("SELECT sev FROM status_history WHERE series = 'module:reconciliation'")
+      .get() as { sev: string };
+    expect(row.sev).toBe("ok");
+    expect(uptimeRow().sev).toBe("ok");
   });
 
   it("records crit once the warm-up backstop is exceeded without readiness", () => {
