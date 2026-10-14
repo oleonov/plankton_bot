@@ -87,6 +87,29 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
 ./deploy.sh --gate-evidence "$GATE_EVIDENCE"
 ```
 
+### Producing gate evidence
+
+`scripts/gate-runner.sh` produces `$GATE_EVIDENCE`. Its steps:
+
+- the fixed focused specs;
+- build, typecheck, test and lint for the whole repository;
+- a test census against the baseline;
+- prettier;
+- a scope check against an allowlist.
+
+Then `finalize` binds the result to the pushed HEAD.
+
+```bash
+export GATE_DIR="$(mktemp -d /private/tmp/krabs-gate.XXXXXX)" BASE_SHA="$(git rev-parse HEAD)"
+pnpm run test > "$GATE_DIR/baseline-test.log" 2>&1   # before any change, on BASE_SHA
+pnpm run lint > "$GATE_DIR/baseline-lint.log" 2>&1
+# ... make the change; list every changed/new repository-relative path in an allowlist ...
+scripts/gate-runner.sh gate "$GATE_DIR/allowlist.txt"
+# ... commit on master and push ...
+scripts/gate-runner.sh finalize
+GATE_EVIDENCE="$GATE_DIR/gate-evidence.json"
+```
+
 If a release is fail-stopped in `target_stopped_rearbitrate` and the stopped target itself must be
 replaced by a newer fix, use the explicit supersede mode. Bind the command to the exact failed
 target SHA from `deploy-recovery.json`; the new checkout still requires its own exact-HEAD gate
