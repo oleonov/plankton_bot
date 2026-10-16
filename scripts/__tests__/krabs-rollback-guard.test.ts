@@ -11,6 +11,9 @@ const guard = join(root, "scripts", "krabs-rollback-guard.sh");
 const deploy = join(root, "deploy.sh");
 const original = "a".repeat(40);
 const target = "b".repeat(40);
+// One guard/deploy script call spawns dozens of stub processes and took over 10s under heavy load
+// (load average ~20). The ceiling only exists to catch a hung guard, so it can be generous.
+const SCRIPT_CALL_TIMEOUT_MS = 30_000;
 const dirs: string[] = [];
 type Fixture = ReturnType<typeof makeFixture>;
 function sql(path: string, statement: string) {
@@ -80,7 +83,7 @@ function makeFixture(paused = false) {
   return { dir, stateDir, marker, control, data, ledger, api, available, identity, health, calls, installBin, units, env };
 }
 // prettier-ignore
-function run(fixture: Fixture,...args: string[]) { const result=spawnSync(guard,args,{env:fixture.env,encoding:"utf8",timeout:10_000}); if(result.error) throw new Error(`${result.error.message}\n${result.stderr}`); return result; }
+function run(fixture: Fixture,...args: string[]) { const result=spawnSync(guard,args,{env:fixture.env,encoding:"utf8",timeout:SCRIPT_CALL_TIMEOUT_MS}); if(result.error) throw new Error(`${result.error.message}\n${result.stderr}`); return result; }
 // prettier-ignore
 function rows(fixture: Fixture) { return JSON.parse(sql(fixture.control,"SELECT json_group_array(json_object('action',action,'initiator_type',initiator_type,'initiator',initiator,'status',status)) FROM operator_commands ORDER BY id;") || "[]"); }
 // prettier-ignore
@@ -132,7 +135,7 @@ cat >/dev/null`,
           FAIL_BUILD: failBuild ? "1" : "0",
         },
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: SCRIPT_CALL_TIMEOUT_MS,
       });
     const failed = runDeploy(true),
       failedCalls = readFileSync(calls, "utf8");
@@ -161,13 +164,13 @@ cat >/dev/null`,
   // prettier-ignore
   it("T28d — negative ownership, identity, and state matrix", () => { const fixture=makeFixture(false); writeFileSync(fixture.identity,"c".repeat(40)); writeFileSync(fixture.health,original); expect(run(fixture,"begin",target).status).not.toBe(0); expect(existsSync(join(fixture.stateDir,"state.json"))).toBe(false); expect(existsSync(fixture.marker)).toBe(false); writeFileSync(fixture.identity,original); writeFileSync(fixture.health,original); begin(fixture); writeFileSync(fixture.identity,"c".repeat(40)); expect(run(fixture,"finalize",target).status).not.toBe(0); expect(JSON.parse(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).phase).toBe("prepared"); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); t28dMatrix(); t28dState(); },90_000);
   // prettier-ignore
-  const t28dMatrix=()=>{ const cases=[{name:"status transport",env:{CURL_MODE:"transport"}},{name:"status malformed",env:{CURL_MODE:"status-malformed"}},{name:"status missing envelope",env:{CURL_MODE:"status-missing"}},{name:"status paused null",env:{CURL_MODE:"status-null"}},{name:"status paused string",env:{CURL_MODE:"status-string"}},{name:"health malformed",env:{CURL_MODE:"health-malformed"}},{name:"health mismatched",env:{CURL_MODE:"health-mismatch"}},{name:"compose nonzero",env:{DOCKER_MODE:"compose-nonzero"}},{name:"inspect nonzero",env:{DOCKER_MODE:"inspect-nonzero"}},{name:"mixed target/api original",env:{DOCKER_MODE:"mixed"}},{name:"missing container",env:{DOCKER_MODE:"missing"}},{name:"stopped container",env:{DOCKER_MODE:"stopped"}},{name:"bad revision label",env:{DOCKER_MODE:"bad-label"}}] as const; for(const paused of [false,true]) for(const row of cases) { const fixture=makeFixture(paused),result=spawnSync(guard,["begin",target],{env:{...fixture.env,...row.env},encoding:"utf8",timeout:10_000}); expect(result.status,`${row.name} paused=${paused}`).not.toBe(0); untouchedBegin(fixture,paused); } };
+  const t28dMatrix=()=>{ const cases=[{name:"status transport",env:{CURL_MODE:"transport"}},{name:"status malformed",env:{CURL_MODE:"status-malformed"}},{name:"status missing envelope",env:{CURL_MODE:"status-missing"}},{name:"status paused null",env:{CURL_MODE:"status-null"}},{name:"status paused string",env:{CURL_MODE:"status-string"}},{name:"health malformed",env:{CURL_MODE:"health-malformed"}},{name:"health mismatched",env:{CURL_MODE:"health-mismatch"}},{name:"compose nonzero",env:{DOCKER_MODE:"compose-nonzero"}},{name:"inspect nonzero",env:{DOCKER_MODE:"inspect-nonzero"}},{name:"mixed target/api original",env:{DOCKER_MODE:"mixed"}},{name:"missing container",env:{DOCKER_MODE:"missing"}},{name:"stopped container",env:{DOCKER_MODE:"stopped"}},{name:"bad revision label",env:{DOCKER_MODE:"bad-label"}}] as const; for(const paused of [false,true]) for(const row of cases) { const fixture=makeFixture(paused),result=spawnSync(guard,["begin",target],{env:{...fixture.env,...row.env},encoding:"utf8",timeout:SCRIPT_CALL_TIMEOUT_MS}); expect(result.status,`${row.name} paused=${paused}`).not.toBe(0); untouchedBegin(fixture,paused); } };
   // prettier-ignore
   const t28dState=()=>{ const fixture=makeFixture(false); expect(run(fixture,"begin",target).status).toBe(0); const prepared=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); expect(run(fixture,"finalize",original).status).not.toBe(0); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(prepared); expect(run(fixture,"abort").status).toBe(0); expect(existsSync(join(fixture.stateDir,"state.json"))).toBe(false); expect(run(fixture,"watch").status).toBe(0); const blocked=makeFixture(false); begin(blocked); addMultirow(blocked); expect(run(blocked,"watch").status).toBe(20); const before=readFileSync(join(blocked.stateDir,"state.json"),"utf8"); expect(run(blocked,"abort").status).not.toBe(0); expect(readFileSync(join(blocked.stateDir,"state.json"),"utf8")).toBe(before); };
   // prettier-ignore
   it("T28e — kernel lock ordering and timeout release", async () => { const fixture=makeFixture(false),lock=join(fixture.stateDir,"operation.lock"); mkdirSync(fixture.stateDir); const holder=spawn("/usr/bin/perl",["-MFcntl=:flock","-e","open(my $fh, '>', $ARGV[0]) or die; flock($fh, LOCK_EX) or die; sleep 1",lock]); await new Promise(resolve=>setTimeout(resolve,100)); expect(run(fixture,"watch").status).not.toBe(0); await new Promise<void>(resolve=>holder.on("exit",()=>resolve())); expect(run(fixture,"watch").status).toBe(0); expect(readFileSync(fixture.calls,"utf8")).toContain("flock --exclusive --nonblock"); t28eTimeout(); },40_000);
   // prettier-ignore
-  const t28eTimeout = () => { const fixture=makeFixture(false); begin(fixture); const before=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); const timed=spawnSync(guard,["watch"],{env:{...fixture.env,DOCKER_HANG:"1",KRABS_ROLLBACK_COMMAND_TIMEOUT_SECONDS:"1"},encoding:"utf8",timeout:10_000}); expect(timed.status).toBe(124); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(before); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); expect(run(fixture,"status").status).toBe(0); };
+  const t28eTimeout = () => { const fixture=makeFixture(false); begin(fixture); const before=readFileSync(join(fixture.stateDir,"state.json"),"utf8"); const timed=spawnSync(guard,["watch"],{env:{...fixture.env,DOCKER_HANG:"1",KRABS_ROLLBACK_COMMAND_TIMEOUT_SECONDS:"1"},encoding:"utf8",timeout:SCRIPT_CALL_TIMEOUT_MS}); expect(timed.status).toBe(124); expect(readFileSync(join(fixture.stateDir,"state.json"),"utf8")).toBe(before); expect(readFileSync(fixture.api,"utf8").trim()).toBe("true"); expect(run(fixture,"status").status).toBe(0); };
   // prettier-ignore
   it("T28f — controller failure, intent arbitration, and API cutover", async () => { t28fIntent(); t28fDelayedStartup(); await t28fController(false); },150_000);
   it("T28k — deploy arbitration is target-bound across a rejected legacy command", () => {
@@ -238,7 +241,7 @@ cat >/dev/null`,
         KRABS_DEPLOY_ARBITRATION_POLL_ATTEMPTS: "2",
       },
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: SCRIPT_CALL_TIMEOUT_MS,
     });
     expect(lateResult.status).not.toBe(0);
     expect(readFileSync(latePause.api, "utf8").trim()).toBe("true");
