@@ -56,6 +56,29 @@ Why it could not do better:
 4. **Bigger bets only scale the zero.** Capital was never the binding constraint. A larger size
    multiplies a per-dollar edge of about 0%.
 
+## Screenshots
+
+The operator dashboard (React, served by the API). These were taken during the final week and on
+the day the account was liquidated.
+
+**Overview.** Runtime health, positions, orders and risk capacity. Below that, the bot's own metrics
+are compared live with the copied trader's baseline (`bl`): win rate, exit multiple, fill rate and
+maker ratio.
+
+![Overview](docs/images/overview.png)
+
+**Status.** Health history of every runtime module, uptime and the deployed version.
+
+![Status page](docs/images/status.png)
+
+**P&L.** Account P&L for the final week, hovering around zero.
+
+![P&L chart](docs/images/pnl-chart.png)
+
+**Trading activity.** Executed orders per 10-minute window over the last 24 hours.
+
+![Trading activity](docs/images/trading-activity.png)
+
 ## Architecture
 
 A pnpm + Turborepo monorepo, Node ≥ 24.
