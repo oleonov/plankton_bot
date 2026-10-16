@@ -116,6 +116,11 @@ function minutesAgo(m: number): string {
   return new Date(Date.now() - m * 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
 }
 
+// Shape of https://data-api.polymarket.com/v2/user-pnl (other per-point fields omitted).
+function v2PnlBody(points: Array<{ timestamp: number; economic_pnl: number }>) {
+  return { data: { interval: "1d", fidelity: "1h", points } };
+}
+
 describe("GET /metrics/portfolio-series", () => {
   it("returns empty items and zero baseline when no snapshots exist", async () => {
     const res = await app.inject({
@@ -370,7 +375,7 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
-  it("uses Polymarket user-pnl-api for live-lite when relayer funderAddress is configured", async () => {
+  it("uses Polymarket data-api v2 user-pnl for live-lite when relayer funderAddress is configured", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
 
@@ -402,16 +407,15 @@ describe("GET /metrics/portfolio-series", () => {
       )
       .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => [
-          { t: Date.parse("2026-04-05T12:30:00Z") / 1000, p: -17.731754 },
-          { t: Date.parse("2026-04-06T11:30:00Z") / 1000, p: -43.41244 },
-        ],
-      } as Response),
-    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () =>
+        v2PnlBody([
+          { timestamp: Date.parse("2026-04-05T12:30:00Z") / 1000, economic_pnl: -17.731754 },
+          { timestamp: Date.parse("2026-04-06T11:30:00Z") / 1000, economic_pnl: -43.41244 },
+        ]),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
 
     const liveLiteApp = await buildServer({
       config: testConfig(),
@@ -436,6 +440,13 @@ describe("GET /metrics/portfolio-series", () => {
       expect(body.data.coverageComplete).toBe(true);
       expect(body.data.items).toHaveLength(2);
       expect(body.data.items[0].capturedAt).toBe("2026-04-05T12:30:00.000Z");
+      const requested = new URL(String(fetchMock.mock.calls[0]?.[0]));
+      expect(requested.origin + requested.pathname).toBe(
+        "https://data-api.polymarket.com/v2/user-pnl",
+      );
+      expect(requested.searchParams.get("user")).toBe("0xf00df00df00df00df00df00df00df00df00df00d");
+      expect(requested.searchParams.get("interval")).toBe("1d");
+      expect(requested.searchParams.get("fidelity")).toBe("1h");
     } finally {
       vi.useRealTimers();
       await liveLiteApp.close();
@@ -478,10 +489,11 @@ describe("GET /metrics/portfolio-series", () => {
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => [
-          { t: Date.parse("2026-04-06T02:00:00Z") / 1000, p: -30.735004 },
-          { t: Date.parse("2026-04-06T21:00:00Z") / 1000, p: -47.98143 },
-        ],
+        json: async () =>
+          v2PnlBody([
+            { timestamp: Date.parse("2026-04-06T02:00:00Z") / 1000, economic_pnl: -30.735004 },
+            { timestamp: Date.parse("2026-04-06T21:00:00Z") / 1000, economic_pnl: -47.98143 },
+          ]),
       } as Response),
     );
 
@@ -544,20 +556,21 @@ describe("GET /metrics/portfolio-series", () => {
       )
       .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
 
-    // Matches real Polymarket response for ALL interval — `p` is cumulative
+    // Matches real Polymarket response for ALL interval — `economic_pnl` is cumulative
     // all-time PnL. Headline for ALL should show the raw latest value, NOT
     // latest - firstPoint (which would hide the first $1 of loss).
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => [
-          { t: Date.parse("2026-04-04T00:00:00Z") / 1000, p: -1 },
-          { t: Date.parse("2026-04-05T00:00:00Z") / 1000, p: -7.103299 },
-          { t: Date.parse("2026-04-06T00:00:00Z") / 1000, p: -17.76856 },
-          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
-          { t: Date.parse("2026-04-07T02:00:00Z") / 1000, p: -48.10861 },
-        ],
+        json: async () =>
+          v2PnlBody([
+            { timestamp: Date.parse("2026-04-04T00:00:00Z") / 1000, economic_pnl: -1 },
+            { timestamp: Date.parse("2026-04-05T00:00:00Z") / 1000, economic_pnl: -7.103299 },
+            { timestamp: Date.parse("2026-04-06T00:00:00Z") / 1000, economic_pnl: -17.76856 },
+            { timestamp: Date.parse("2026-04-07T00:00:00Z") / 1000, economic_pnl: -48.15537 },
+            { timestamp: Date.parse("2026-04-07T02:00:00Z") / 1000, economic_pnl: -48.10861 },
+          ]),
       } as Response),
     );
 
@@ -630,10 +643,11 @@ describe("GET /metrics/portfolio-series", () => {
         "fetch",
         vi.fn().mockResolvedValue({
           ok: true,
-          json: async () => [
-            { t: Date.parse("2026-03-08T00:00:00Z") / 1000, p: -1 },
-            { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
-          ],
+          json: async () =>
+            v2PnlBody([
+              { timestamp: Date.parse("2026-03-08T00:00:00Z") / 1000, economic_pnl: -1 },
+              { timestamp: Date.parse("2026-04-07T00:00:00Z") / 1000, economic_pnl: -48.15537 },
+            ]),
         } as Response),
       );
 
@@ -702,10 +716,11 @@ describe("GET /metrics/portfolio-series", () => {
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => [
-          { t: Date.parse("2026-03-08T12:00:00Z") / 1000, p: -164.39581 },
-          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -257.3589 },
-        ],
+        json: async () =>
+          v2PnlBody([
+            { timestamp: Date.parse("2026-03-08T12:00:00Z") / 1000, economic_pnl: -164.39581 },
+            { timestamp: Date.parse("2026-04-07T00:00:00Z") / 1000, economic_pnl: -257.3589 },
+          ]),
       } as Response),
     );
 
@@ -772,10 +787,11 @@ describe("GET /metrics/portfolio-series", () => {
       "fetch",
       vi.fn().mockResolvedValue({
         ok: true,
-        json: async () => [
-          { t: Date.parse("2026-04-03T12:00:00Z") / 1000, p: -1 },
-          { t: Date.parse("2026-04-06T12:00:00Z") / 1000, p: -43.41244 },
-        ],
+        json: async () =>
+          v2PnlBody([
+            { timestamp: Date.parse("2026-04-03T12:00:00Z") / 1000, economic_pnl: -1 },
+            { timestamp: Date.parse("2026-04-06T12:00:00Z") / 1000, economic_pnl: -43.41244 },
+          ]),
       } as Response),
     );
 
@@ -806,7 +822,7 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
-  it("falls back to local snapshots when Polymarket user-pnl-api is unavailable", async () => {
+  it("falls back to local snapshots when Polymarket user-pnl is unavailable", async () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
@@ -866,6 +882,69 @@ describe("GET /metrics/portfolio-series", () => {
       expect(body.data.currentEquity).toBe(76.6);
       expect(body.data.portfolioPnl).toBeCloseTo(-23.4, 6);
       expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      await fallbackApp.close();
+    }
+  });
+
+  it.each([
+    ["has no data.points array", { points: [] }],
+    [
+      "has a non-numeric economic_pnl point",
+      {
+        data: {
+          points: [
+            { timestamp: Date.parse("2026-04-05T12:30:00Z") / 1000, economic_pnl: -1 },
+            { timestamp: Date.parse("2026-04-06T11:30:00Z") / 1000, economic_pnl: "-43.4" },
+          ],
+        },
+      },
+    ],
+  ])("falls back to local snapshots when the user-pnl body %s", async (_label, body) => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', '2026-03-30T00:00:00.000Z')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+    insertSnapshot("live-lite", 77.5, 0, 5, 40, minutesAgo(30));
+    insertSnapshot("live-lite", 76.6, 0, 4, 40, minutesAgo(5));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => body } as Response),
+    );
+
+    const fallbackApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await fallbackApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const data = res.json().data;
+
+      expect(data.currentEquity).toBe(76.6);
+      expect(data.items).toHaveLength(2);
     } finally {
       await fallbackApp.close();
     }

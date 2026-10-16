@@ -11,7 +11,19 @@ interface PortfolioSeriesOpts {
   defaultInitialBalanceUsdc?: number | null | undefined;
 }
 
-type ExternalPnlPoint = { t: number; p: number };
+type ExternalPnlPoint = { timestamp: number; economic_pnl: number };
+
+function isExternalPnlPoint(point: unknown): point is ExternalPnlPoint {
+  const candidate = point as Partial<ExternalPnlPoint> | null;
+  return Number.isFinite(candidate?.timestamp) && Number.isFinite(candidate?.economic_pnl);
+}
+
+// A partly malformed series is not charted at all: null sends the route to local snapshots.
+function parseExternalPnlPoints(body: unknown): ExternalPnlPoint[] | null {
+  const points = (body as { data?: { points?: unknown } } | null)?.data?.points;
+  if (!Array.isArray(points) || points.length === 0) return null;
+  return points.every(isExternalPnlPoint) ? points : null;
+}
 
 const EXTERNAL_FIDELITY_MAP: Record<"1d" | "1w" | "1m" | "all", string> = {
   "1d": "1h",
@@ -68,8 +80,8 @@ async function fetchExternalPortfolioSeries(
   historyStart: string | null;
   coverageComplete: boolean;
 } | null> {
-  const url = new URL("https://user-pnl-api.polymarket.com/user-pnl");
-  url.searchParams.set("user_address", funderAddress);
+  const url = new URL("https://data-api.polymarket.com/v2/user-pnl");
+  url.searchParams.set("user", funderAddress);
   url.searchParams.set("interval", interval);
   const fidelity = EXTERNAL_FIDELITY_MAP[interval];
   url.searchParams.set("fidelity", fidelity);
@@ -80,15 +92,15 @@ async function fetchExternalPortfolioSeries(
       await res.body?.cancel().catch(() => undefined);
       return null;
     }
-    const data = (await res.json()) as ExternalPnlPoint[];
-    if (!Array.isArray(data) || data.length === 0) return null;
+    const points = parseExternalPnlPoints(await res.json());
+    if (!points) return null;
 
-    const items = data.map((point) => ({
-      equityUsdc: point.p,
+    const items = points.map((point) => ({
+      equityUsdc: point.economic_pnl,
       realizedPnlUsdc: 0,
       positionValueUsdc: 0,
       openValueUsdc: 0,
-      capturedAt: new Date(point.t * 1000).toISOString(),
+      capturedAt: new Date(point.timestamp * 1000).toISOString(),
     }));
     const firstPoint = items[0] ?? null;
     const latest = items[items.length - 1] ?? null;
@@ -97,7 +109,7 @@ async function fetchExternalPortfolioSeries(
     const windowStartMs =
       intervalWindowMs != null ? Date.now() - intervalWindowMs : Number.NEGATIVE_INFINITY;
     const firstPointMs = firstPoint ? Date.parse(firstPoint.capturedAt) : NaN;
-    // Polymarket's `p` is cumulative P/L. Windowed tabs display the delta
+    // Polymarket's `economic_pnl` is cumulative P/L. Windowed tabs display the delta
     // over that window when the API series itself covers it; ALL remains cumulative.
     const useRollingBaseline =
       interval !== "all" &&
