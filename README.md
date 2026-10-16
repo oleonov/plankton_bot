@@ -1,14 +1,9 @@
 # Krabs — a Polymarket copy-trading experiment
 
-> **Status: archived (October 2026).** The bot was stopped and its live account was liquidated on
-> 2026-10-16. It traded with real money and finished **around break-even, with no meaningful
-> profit**. The code is published as a reference, not as a working
-> money-maker. Running it risks real funds; nothing here is financial advice.
-
-## What this was
+## What this is
 
 Krabs is a TypeScript trading bot for [Polymarket](https://polymarket.com) prediction markets. Its
-goal was to **replicate the strategy of a consistently profitable Polymarket trader,
+goal is to **replicate the strategy of a consistently profitable Polymarket trader,
 [planktonXD](https://polymarket.com/@planktonXD)**
 ([wallet](https://polymarket.com/profile/0x4ffe49ba2a4cae123536a8af4fda48faeb609f71)), as faithfully
 as possible, and only then improve on it. His account shows about +$146k of lifetime profit on
@@ -28,8 +23,8 @@ hypothesis was tested before it shipped (see [What was analyzed](#what-was-analy
 
 ## Result
 
-The final version of the strategy (a single-rung bounce exit) went live on 2026-10-05 and ran
-until the account was liquidated on 2026-10-16:
+The final version of the strategy (a single-rung bounce exit) traded live with real money from
+2026-10-05 to 2026-10-16:
 
 | Since 2026-10-05 (11 days)   | Value                                       |
 | ---------------------------- | ------------------------------------------- |
@@ -58,8 +53,7 @@ Why it could not do better:
 
 ## Screenshots
 
-The operator dashboard (React, served by the API). These were taken during the final week and on
-the day the account was liquidated.
+The operator dashboard (React, served by the API).
 
 **Overview.** Runtime health, positions, orders and risk capacity. Below that, the bot's own metrics
 are compared live with the copied trader's baseline (`bl`): win rate, exit multiple, fill rate and
@@ -112,6 +106,8 @@ pnpm install
 pnpm run build
 pnpm run test
 ```
+
+**Live mode places real orders with real funds. Nothing here is financial advice.**
 
 Only the `live-lite` profile can be run; `simulation` and `paper` remain as test doubles. **The
 runtime always starts paused** and places no orders until it is resumed from the dashboard or the
