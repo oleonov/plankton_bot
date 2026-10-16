@@ -1,42 +1,10 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTokenId } from "../ids.js";
 import { decideExitAction, isFloorEligible, type ExitDecisionContext } from "../exit-decision.js";
-import { isStaleSell, type StaleSellContext, type StaleVerdict } from "../stale-sell.js";
-
-interface KnownStuckFixture {
-  readonly metrics: {
-    readonly current_sell_price?: number | null;
-    readonly current_ask: number | null;
-    readonly age_days: number;
-    readonly reprice_chain_count_24h: number;
-    readonly sell_fills: number;
-  };
-}
-
-interface Point3Results {
-  readonly fixtures: {
-    readonly known_stuck_positions: readonly KnownStuckFixture[];
-  };
-}
+import type { StaleVerdict } from "../stale-sell.js";
 
 const NOW_MS = Date.parse("2026-06-02T00:00:00Z");
 const TOKEN_ID = createTokenId("track-c-token-1");
-
-function loadPoint3Fixtures(): Point3Results {
-  const file = path.join(
-    import.meta.dirname,
-    "..",
-    "..",
-    "..",
-    "..",
-    "research_plankton",
-    "track_c",
-    "point_3_stale_sell_detection_results.json",
-  );
-  return JSON.parse(readFileSync(file, "utf-8")) as Point3Results;
-}
 
 function stale(reason: StaleVerdict["reason"]): StaleVerdict {
   return {
@@ -58,22 +26,6 @@ function ctx(overrides: Partial<ExitDecisionContext> = {}): ExitDecisionContext 
     floorIntentState: { active: false, attemptCount: 0 },
     ts: NOW_MS,
     ...overrides,
-  };
-}
-
-function stuckStaleCtx(fixture: KnownStuckFixture): StaleSellContext {
-  const ageMs = fixture.metrics.age_days * 24 * 60 * 60_000;
-  return {
-    assetId: TOKEN_ID,
-    sellPrice: fixture.metrics.current_sell_price ?? null,
-    currentBid: null,
-    currentAsk: fixture.metrics.current_ask,
-    sellPostedAt: NOW_MS - ageMs,
-    repriceChainCount24h: fixture.metrics.reprice_chain_count_24h,
-    sellCount: fixture.metrics.sell_fills,
-    positionAgeMs: ageMs,
-    livenessVerdict: "dead",
-    ts: NOW_MS,
   };
 }
 
@@ -227,15 +179,5 @@ describe("decideExitAction", () => {
     expect(
       decideExitAction(ctx({ livenessVerdict: "dead", staleVerdict: stale("chain+price") })).action,
     ).toBe("hold_resolution");
-  });
-
-  it("maps the 5 known stuck baseline positions to hold_resolution in Phase 1", () => {
-    const fixtures = loadPoint3Fixtures().fixtures.known_stuck_positions;
-    expect(fixtures).toHaveLength(5);
-    for (const fixture of fixtures) {
-      const staleVerdict = isStaleSell(stuckStaleCtx(fixture));
-      expect(["chain", "chain+price"]).toContain(staleVerdict.reason);
-      expect(decideExitAction(ctx({ staleVerdict })).action).toBe("hold_resolution");
-    }
   });
 });

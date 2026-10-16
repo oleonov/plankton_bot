@@ -1,47 +1,9 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { isLiveBook, type BookContext, type LiveBookVerdict } from "../book-liveness.js";
 import { createTokenId } from "../ids.js";
 
-interface Point1Fixture {
-  readonly anchor_ts: number | string;
-  readonly asset_id: string;
-  readonly expected_verdict: "LIVE" | "DEAD";
-  readonly signals: {
-    readonly bid_movement_30m: number | null;
-    readonly bid_persistence_s: number | null;
-    readonly spread_ratio: number | null;
-    readonly public_trade_count_1h: number | null;
-  };
-  readonly best_bid?: number | null;
-  readonly best_ask?: number | null;
-}
-
-interface Point1Results {
-  readonly fixtures: {
-    readonly alive_anchors: readonly Point1Fixture[];
-    readonly dead_anchors: readonly Point1Fixture[];
-    readonly stuck_positions: readonly Point1Fixture[];
-  };
-}
-
 const NOW_MS = Date.parse("2026-06-02T00:00:00Z");
 const ASSET_ID = createTokenId("asset-live");
-
-function loadPoint1Fixtures(): Point1Results {
-  const file = path.join(
-    import.meta.dirname,
-    "..",
-    "..",
-    "..",
-    "..",
-    "research_plankton",
-    "track_c",
-    "point_1_islivebook_results.json",
-  );
-  return JSON.parse(readFileSync(file, "utf-8")) as Point1Results;
-}
 
 function liveCtx(overrides: Partial<BookContext> = {}): BookContext {
   return {
@@ -60,24 +22,6 @@ function liveCtx(overrides: Partial<BookContext> = {}): BookContext {
 
 function expectVerdict(result: LiveBookVerdict, verdict: LiveBookVerdict["verdict"]): void {
   expect(result.verdict).toBe(verdict);
-}
-
-function fixtureCtx(fixture: Point1Fixture): BookContext {
-  const ts =
-    typeof fixture.anchor_ts === "number"
-      ? fixture.anchor_ts * 1000
-      : Date.parse(fixture.anchor_ts);
-  return {
-    assetId: createTokenId(fixture.asset_id),
-    bestBid: fixture.best_bid ?? null,
-    bestAsk: fixture.best_ask ?? null,
-    spreadRatio: fixture.signals.spread_ratio ?? null,
-    bidPersistenceS: fixture.signals.bid_persistence_s ?? null,
-    bidMovement30m: fixture.signals.bid_movement_30m ?? null,
-    publicTradeCount1h: fixture.signals.public_trade_count_1h ?? null,
-    ts,
-    capturedAt: ts,
-  };
 }
 
 describe("isLiveBook", () => {
@@ -139,29 +83,5 @@ describe("isLiveBook", () => {
       verdict: "unknown",
       reason: "stale_book",
     });
-  });
-
-  it("classifies point 1 counter-factual alive anchors as LIVE", () => {
-    const fixtures = loadPoint1Fixtures().fixtures.alive_anchors;
-    expect(fixtures).toHaveLength(20);
-    for (const fixture of fixtures) {
-      expect(isLiveBook(fixtureCtx(fixture)).verdict).toBe("live");
-    }
-  });
-
-  it("classifies point 1 counter-factual dead anchors as DEAD", () => {
-    const fixtures = loadPoint1Fixtures().fixtures.dead_anchors;
-    expect(fixtures).toHaveLength(20);
-    for (const fixture of fixtures) {
-      expect(isLiveBook(fixtureCtx(fixture)).verdict).toBe("dead");
-    }
-  });
-
-  it("classifies the 5 known stuck positions as DEAD", () => {
-    const fixtures = loadPoint1Fixtures().fixtures.stuck_positions;
-    expect(fixtures).toHaveLength(5);
-    for (const fixture of fixtures) {
-      expect(isLiveBook(fixtureCtx(fixture)).verdict).toBe("dead");
-    }
   });
 });

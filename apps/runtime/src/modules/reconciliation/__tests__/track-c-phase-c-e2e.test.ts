@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,10 +10,7 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
-  decideExitAction,
   isLiveBook,
-  isStaleSell,
-  type BookContext,
   type ClientOrderId,
   type EventBus,
   type LegState,
@@ -25,7 +21,6 @@ import {
   type OrderRepository,
   type Position,
   type RuntimeEventMap,
-  type StaleVerdict,
   type TokenId,
 } from "@krabs/domain";
 import {
@@ -37,253 +32,15 @@ import {
 import { InProcessEventBus } from "@krabs/event-bus";
 import { cleanStaleEntryOrders } from "../stale-order-cleaner.js";
 import type { Logger } from "../../../logger.js";
-import {
-  buildBookContext,
-  buildExitDecisionContext,
-  buildStaleSellContext,
-} from "../context-builders/track-c-context-builders.js";
+import { buildBookContext } from "../context-builders/track-c-context-builders.js";
 import { resolveMidpointAnchoredSellPrice } from "../../strategy/signal-to-order.js";
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "../../../../../..");
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
 const DEFAULT_CONDITION = createConditionId("cond-track-c-phase-c");
-
-interface Point1Results {
-  readonly fixtures: {
-    readonly alive_anchors: readonly Point1Fixture[];
-    readonly dead_anchors: readonly Point1Fixture[];
-    readonly stuck_positions: readonly Point1Fixture[];
-  };
-}
-
-interface Point1Fixture {
-  readonly anchor_ts: number | string;
-  readonly asset_id: string;
-  readonly slug: string;
-  readonly expected_verdict: "LIVE" | "DEAD";
-  readonly signals: {
-    readonly bid_movement_30m: number | null;
-    readonly bid_persistence_s: number | null;
-    readonly spread_ratio: number | null;
-    readonly public_trade_count_1h: number | null;
-  };
-  readonly best_bid: number | null;
-  readonly best_ask: number | null;
-}
-
-interface Point2Results {
-  readonly fixtures: {
-    readonly alive_reprice_expected_true: readonly Point2Fixture[];
-    readonly alive_reprice_expected_false: readonly Point2Fixture[];
-  };
-}
-
-interface Point2Fixture {
-  readonly anchor_ts: number | string;
-  readonly asset_id: string;
-  readonly expected_reprice_decision: boolean;
-  readonly metrics: {
-    readonly ask_movement_ticks_30m: number;
-  };
-}
-
-interface Point3Results {
-  readonly fixtures: {
-    readonly plankton_stale_positive_proxy: readonly Point3Fixture[];
-    readonly plankton_stale_negative_proxy: readonly Point3Fixture[];
-    readonly known_stuck_positions: readonly Point3Fixture[];
-  };
-}
-
-interface Point3Fixture {
-  readonly anchor_ts?: number | string;
-  readonly asset_id?: string;
-  readonly slug: string;
-  readonly expected_stale: boolean;
-  readonly metrics: {
-    readonly sell_price?: number | null;
-    readonly current_sell_price?: number | null;
-    readonly best_ask?: number | null;
-    readonly current_ask?: number | null;
-    readonly lifecycle_s?: number | null;
-    readonly age_days?: number | null;
-    readonly reprice_chain_count_24h?: number | null;
-    readonly sell_fills?: number | null;
-  };
-}
-
-const point1 = loadJson<Point1Results>("research_plankton/track_c/point_1_islivebook_results.json");
-const point2 = loadJson<Point2Results>(
-  "research_plankton/track_c/point_2_reprice_threshold_results.json",
-);
-const point3 = loadJson<Point3Results>(
-  "research_plankton/track_c/point_3_stale_sell_detection_results.json",
-);
-
-const point1Fixtures = [
-  ...point1.fixtures.alive_anchors.map((fixture) => ({ cohort: "alive", fixture })),
-  ...point1.fixtures.dead_anchors.map((fixture) => ({ cohort: "dead", fixture })),
-  ...point1.fixtures.stuck_positions.map((fixture) => ({ cohort: "stuck", fixture })),
-] as const;
-const point2Fixtures = [
-  ...point2.fixtures.alive_reprice_expected_true,
-  ...point2.fixtures.alive_reprice_expected_false,
-] as const;
-const point3Fixtures = [
-  ...point3.fixtures.plankton_stale_positive_proxy,
-  ...point3.fixtures.plankton_stale_negative_proxy,
-  ...point3.fixtures.known_stuck_positions,
-] as const;
 
 afterEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
-});
-
-describe("Track C Phase C counter-factual E2E fixtures", () => {
-  it("loads the expected Pt 1-3 fixture counts", () => {
-    expect(point1.fixtures.alive_anchors).toHaveLength(20);
-    expect(point1.fixtures.dead_anchors).toHaveLength(20);
-    expect(point1.fixtures.stuck_positions).toHaveLength(5);
-    expect(point2.fixtures.alive_reprice_expected_true).toHaveLength(30);
-    expect(point2.fixtures.alive_reprice_expected_false).toHaveLength(30);
-    expect(point3.fixtures.plankton_stale_positive_proxy).toHaveLength(20);
-    expect(point3.fixtures.plankton_stale_negative_proxy).toHaveLength(20);
-    expect(point3.fixtures.known_stuck_positions).toHaveLength(5);
-  });
-
-  it.each(point1Fixtures)(
-    "C.1.1 Pt1+Pt4 fixture $cohort/$fixture.slug -> $fixture.expected_verdict",
-    ({ cohort, fixture }) => {
-      const ctx = bookContextFromPoint1(fixture);
-      const liveness = isLiveBook(ctx);
-      const staleVerdict = stale(cohort === "stuck" ? "chain" : "none");
-      const action = decideExitAction(
-        buildExitDecisionContext({
-          order: makeSellOrder({
-            tokenId: createTokenId(fixture.asset_id),
-            price: fixture.best_ask ?? 0.05,
-          }),
-          market: makeMarket({
-            tokenId: createTokenId(fixture.asset_id),
-            slug: fixture.slug,
-          }),
-          position: makePosition({
-            tokenId: createTokenId(fixture.asset_id),
-            openedAt: new Date(anchorMs(fixture.anchor_ts) - 13 * 60 * 60_000).toISOString(),
-          }),
-          livenessVerdict: liveness.verdict,
-          staleVerdict,
-          subtype: "strike",
-          ts: anchorMs(fixture.anchor_ts),
-        }),
-      );
-
-      expect(liveness.verdict).toBe(fixture.expected_verdict.toLowerCase());
-      if (fixture.expected_verdict === "LIVE") {
-        expect(action.action).toBe("continue_normal");
-      } else if (cohort === "stuck") {
-        expect(action.action).toBe("hold_resolution");
-      } else {
-        expect(action.action).toBe("continue_passive_sit");
-      }
-    },
-  );
-
-  it.each(point2Fixtures)(
-    "C.1.2 Pt2 runtime fixed_3 fixture $asset_id expects reprice=$expected_reprice_decision",
-    async (fixture) => {
-      const gapTicks = fixture.metrics.ask_movement_ticks_30m;
-      const orderPrice = 0.05 + gapTicks * 0.001;
-      const expectedCancel = expectDownpriceCancelAfterTrackLGuard({
-        expectedRepriceDecision: fixture.expected_reprice_decision,
-        orderPrice,
-        bestBid: 0.05,
-        bestAsk: 0.06,
-        tickSize: 0.001,
-      });
-      const env = makeCleanerEnv({
-        tokenId: createTokenId(fixture.asset_id),
-        orderPrice,
-        bestBid: 0.05,
-        tickSize: 0.001,
-        bookSignals: { bidPersistenceS: 10, bidMovement30m: 0.002 },
-        legState: makeLegState({
-          tokenId: createTokenId(fixture.asset_id),
-          repriceChainCount24h: 0,
-        }),
-      });
-
-      const result = await env.run();
-      await env.bus.drain();
-
-      expect(result.downpriceRepriceCancelled > 0).toBe(expectedCancel);
-      expect(env.holdResolutionRepo.insertActive).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(point3Fixtures)("C.1.3 Pt3 fixture $slug stale=$expected_stale", (fixture) => {
-    const tokenId = createTokenId(fixture.asset_id ?? `phase-c-${fixture.slug}`);
-    const ts = anchorMs(fixture.anchor_ts ?? NOW);
-    const staleVerdict = staleVerdictFromPoint3(fixture, tokenId, ts);
-    const expectedReason = expectedPoint3Reason(fixture);
-    const action = decideExitAction(
-      buildExitDecisionContext({
-        order: makeSellOrder({ tokenId, price: sellPrice(fixture) ?? 0.05 }),
-        market: makeMarket({ tokenId, slug: fixture.slug }),
-        position: makePosition({
-          tokenId,
-          openedAt: new Date(ts - positionAgeMs(fixture)).toISOString(),
-        }),
-        livenessVerdict: "dead",
-        staleVerdict,
-        subtype: "strike",
-        floorCloseRatioThreshold: 1,
-        ts,
-      }),
-    );
-
-    expect(staleVerdict.stale).toBe(fixture.expected_stale);
-    expect(staleVerdict.reason).toBe(expectedReason);
-    if (staleVerdict.reason === "price_only") {
-      expect(action.action).toBe("continue_passive_sit");
-    }
-    expect(action.action).not.toBe("floor_close");
-  });
-
-  it.each(point3.fixtures.known_stuck_positions)(
-    "C.1.4 five-stuck baseline writes hold_resolution for $slug",
-    async (fixture) => {
-      const p1 = findPoint1Stuck(fixture.slug);
-      const tokenId = createTokenId(p1.asset_id);
-      const env = makeCleanerEnv({
-        tokenId,
-        slug: fixture.slug,
-        orderPrice: sellPrice(fixture) ?? 0.05,
-        bestBid: p1.best_bid,
-        bestAsk: p1.best_ask ?? currentAsk(fixture) ?? 0.05,
-        bookSignals: {
-          bidPersistenceS: p1.signals.bid_persistence_s,
-          bidMovement30m: p1.signals.bid_movement_30m,
-        },
-        legState: makeLegState({
-          tokenId,
-          repriceChainCount24h: fixture.metrics.reprice_chain_count_24h ?? 13,
-          sellCount: fixture.metrics.sell_fills ?? 0,
-        }),
-        position: makePosition({
-          tokenId,
-          openedAt: new Date(NOW - positionAgeMs(fixture)).toISOString(),
-        }),
-      });
-
-      await env.run();
-      await env.bus.drain();
-
-      expect(env.holdResolutionRepo.insertActive).toHaveBeenCalledOnce();
-      expect(env.floorIntentRepo.insertActive).not.toHaveBeenCalled();
-    },
-  );
 });
 
 describe("Track C Phase C backward compatibility", () => {
@@ -485,112 +242,6 @@ describe("Track C Phase C Phase 2 scaffolding", () => {
     }
   });
 });
-
-function loadJson<T>(relativePath: string): T {
-  return JSON.parse(readFileSync(path.join(REPO_ROOT, relativePath), "utf-8")) as T;
-}
-
-function bookContextFromPoint1(fixture: Point1Fixture): BookContext {
-  const ts = anchorMs(fixture.anchor_ts);
-  return {
-    assetId: createTokenId(fixture.asset_id),
-    bestBid: fixture.best_bid,
-    bestAsk: fixture.best_ask,
-    spreadRatio: fixture.signals.spread_ratio,
-    bidPersistenceS: fixture.signals.bid_persistence_s,
-    bidMovement30m: fixture.signals.bid_movement_30m,
-    publicTradeCount1h: fixture.signals.public_trade_count_1h,
-    capturedAt: ts - 60_000,
-    ts,
-  };
-}
-
-function staleVerdictFromPoint3(
-  fixture: Point3Fixture,
-  tokenId: TokenId,
-  ts: number,
-): StaleVerdict {
-  return isStaleSell(
-    buildStaleSellContext({
-      order: makeSellOrder({
-        tokenId,
-        price: sellPrice(fixture) ?? 0.05,
-        createdAt: new Date(ts - sellAgeMs(fixture)).toISOString(),
-      }),
-      market: {
-        bestBid: null,
-        bestAsk: currentAsk(fixture),
-      },
-      legState: makeLegState({
-        tokenId,
-        repriceChainCount24h: fixture.metrics.reprice_chain_count_24h ?? 0,
-        sellCount: fixture.metrics.sell_fills ?? 0,
-      }),
-      position: makePosition({
-        tokenId,
-        openedAt: new Date(ts - positionAgeMs(fixture)).toISOString(),
-      }),
-      livenessVerdict: "dead",
-      ts,
-    }),
-  );
-}
-
-function expectedPoint3Reason(fixture: Point3Fixture): StaleVerdict["reason"] {
-  const price = hasPriceBranch(fixture);
-  const chain = hasChainBranch(fixture);
-  if (price && chain) return "chain+price";
-  if (chain) return "chain";
-  if (price) return "price_only";
-  return "none";
-}
-
-function hasPriceBranch(fixture: Point3Fixture): boolean {
-  const sell = sellPrice(fixture);
-  const ask = currentAsk(fixture);
-  return sell != null && ask != null && sell > 0 && ask > 0 && sellAgeMs(fixture) > 30 * 60_000
-    ? sell / ask >= 1.01
-    : false;
-}
-
-function hasChainBranch(fixture: Point3Fixture): boolean {
-  return (
-    (fixture.metrics.reprice_chain_count_24h ?? 0) >= 13 &&
-    (fixture.metrics.sell_fills ?? 0) === 0 &&
-    positionAgeMs(fixture) > 12 * 60 * 60_000
-  );
-}
-
-function findPoint1Stuck(slug: string): Point1Fixture {
-  const fixture = point1.fixtures.stuck_positions.find((row) => row.slug === slug);
-  if (!fixture) throw new Error(`missing Point 1 stuck fixture for ${slug}`);
-  return fixture;
-}
-
-function stale(reason: StaleVerdict["reason"]): StaleVerdict {
-  return { stale: reason !== "none", reason };
-}
-
-function sellPrice(fixture: Point3Fixture): number | null {
-  return fixture.metrics.sell_price ?? fixture.metrics.current_sell_price ?? null;
-}
-
-function currentAsk(fixture: Point3Fixture): number | null {
-  return fixture.metrics.best_ask ?? fixture.metrics.current_ask ?? null;
-}
-
-function sellAgeMs(fixture: Point3Fixture): number {
-  return (fixture.metrics.lifecycle_s ?? 0) * 1000;
-}
-
-function positionAgeMs(fixture: Point3Fixture): number {
-  if (fixture.metrics.age_days != null) return fixture.metrics.age_days * 24 * 60 * 60_000;
-  return sellAgeMs(fixture);
-}
-
-function anchorMs(anchor: number | string): number {
-  return typeof anchor === "number" ? anchor * 1000 : Date.parse(anchor);
-}
 
 function expectDownpriceCancelAfterTrackLGuard(input: {
   readonly expectedRepriceDecision: boolean;

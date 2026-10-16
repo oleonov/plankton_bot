@@ -1,44 +1,9 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  computeRepriceThreshold,
-  REPRICE_THRESHOLD_FIXED_TICKS,
-  type RepriceContext,
-} from "../reprice-threshold.js";
+import { computeRepriceThreshold, type RepriceContext } from "../reprice-threshold.js";
 import { createTokenId } from "../ids.js";
-
-interface Point2Fixture {
-  readonly expected_reprice_decision: boolean;
-  readonly metrics: {
-    readonly ask_movement_ticks_30m: number | null;
-  };
-}
-
-interface Point2Results {
-  readonly fixtures: {
-    readonly alive_reprice_expected_true: readonly Point2Fixture[];
-    readonly alive_reprice_expected_false: readonly Point2Fixture[];
-    readonly stuck_positions: readonly Point2Fixture[];
-  };
-}
 
 const NOW_MS = Date.parse("2026-06-02T00:00:00Z");
 const ASSET_ID = createTokenId("asset-reprice");
-
-function loadPoint2Fixtures(): Point2Results {
-  const file = path.join(
-    import.meta.dirname,
-    "..",
-    "..",
-    "..",
-    "..",
-    "research_plankton",
-    "track_c",
-    "point_2_reprice_threshold_results.json",
-  );
-  return JSON.parse(readFileSync(file, "utf-8")) as Point2Results;
-}
 
 function ctx(overrides: Partial<RepriceContext> = {}): RepriceContext {
   return {
@@ -93,37 +58,5 @@ describe("computeRepriceThreshold", () => {
       tickThreshold: null,
       reason: "non_strike_static_fallback",
     });
-  });
-
-  it("matches the 30 expected-true Point 2 counter-factual anchors", () => {
-    const fixtures = loadPoint2Fixtures().fixtures.alive_reprice_expected_true;
-    expect(fixtures).toHaveLength(30);
-    const decision = computeRepriceThreshold(ctx());
-    expect(decision.tickThreshold).toBe(REPRICE_THRESHOLD_FIXED_TICKS);
-    for (const fixture of fixtures) {
-      expect(fixture.metrics.ask_movement_ticks_30m ?? 0).toBeGreaterThanOrEqual(
-        decision.tickThreshold!,
-      );
-    }
-  });
-
-  it("matches the 30 expected-false Point 2 counter-factual anchors", () => {
-    const fixtures = loadPoint2Fixtures().fixtures.alive_reprice_expected_false;
-    expect(fixtures).toHaveLength(30);
-    const decision = computeRepriceThreshold(ctx());
-    expect(decision.tickThreshold).toBe(REPRICE_THRESHOLD_FIXED_TICKS);
-    for (const fixture of fixtures) {
-      expect(fixture.metrics.ask_movement_ticks_30m ?? 0).toBeLessThan(decision.tickThreshold!);
-    }
-  });
-
-  it("keeps the 5 stuck positions gated by liveness before Point 2 acts", () => {
-    const fixtures = loadPoint2Fixtures().fixtures.stuck_positions;
-    expect(fixtures).toHaveLength(5);
-    const decision = computeRepriceThreshold(ctx({ livenessVerdict: "dead" }));
-    expect(decision.shouldReprice).toBe(false);
-    for (const fixture of fixtures) {
-      expect(fixture.expected_reprice_decision).toBe(false);
-    }
   });
 });

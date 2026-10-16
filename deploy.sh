@@ -3,9 +3,11 @@ set -euo pipefail
 
 readonly DEPLOY_SECONDS=2640
 readonly REMOTE_SECONDS=2580
-readonly SERVER_USER=root SERVER_HOST=your.server.ip SERVER_PATH=/opt/krabs
-readonly IMAGE=ghcr.io/oleonov/krabs
-readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh scripts/krabs-order-status-migration-gate.sh scripts/__tests__/krabs-order-status-migration-gate.test.ts apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts CHANGELOG.md docs/ROADMAP.md docs/plans/2026-08-11-swallowed-fill-recovery-and-multirow-token.md docs/runbooks/live_lite_rollout.md)
+# Server and image come from .env.deploy (see .env.deploy.example) or the environment.
+if [[ -f .env.deploy ]]; then set -a; . ./.env.deploy; set +a; fi
+readonly SERVER_USER="${KRABS_SERVER_USER:-root}" SERVER_HOST="${KRABS_SERVER_HOST:-}" SERVER_PATH="${KRABS_SERVER_PATH:-/opt/krabs}"
+readonly IMAGE="${KRABS_IMAGE_REPO:-ghcr.io/oleonov/krabs}"
+readonly RETAINED=(deploy.sh scripts/krabs-rollback-guard.sh scripts/krabs-order-status-migration-gate.sh scripts/__tests__/krabs-order-status-migration-gate.test.ts apps/api/src/routes/actions.ts packages/db/src/repositories/operator-command-repository.ts scripts/__tests__/krabs-rollback-guard.test.ts apps/api/src/__tests__/api.test.ts packages/db/src/__tests__/operator-repository.test.ts docs/runbooks/live_lite_rollout.md)
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
@@ -320,6 +322,7 @@ set_trading_restart() {
   run "$DOCKER" update "--restart=$policy" "$runtime" "$manager"
 }
 ordinary_preflight() {
+  test_mode || [[ -n "$SERVER_HOST" ]] || die 'set KRABS_SERVER_HOST in .env.deploy'
   [[ -f .env.production ]] || die '.env.production is absent'; node -e 'process.exit(+process.versions.node.split(".")[0]>=24?0:1)' || die 'Node >=24 is required'
   pnpm --version >/dev/null; run docker info >/dev/null
   node -e 'const f=require("fs"),o=require("os"),p=require("path");const r=process.env.DOCKER_CONFIG||p.join(o.homedir(),".docker"),d=JSON.parse(f.readFileSync(p.join(r,"config.json")));process.exit(d.auths?.["ghcr.io"]||d.credHelpers?.["ghcr.io"]?0:1)' || die 'GHCR Docker login is required'

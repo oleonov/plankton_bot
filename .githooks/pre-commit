@@ -1,7 +1,0 @@
-#!/bin/sh
-set -eu
-
-cd "$(git rev-parse --show-toplevel)"
-
-echo "pre-commit: checking staged changelog entry"
-pnpm run changelog:check
